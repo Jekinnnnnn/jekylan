@@ -1,0 +1,44 @@
+provider: anthropic
+model: deepseek-v4-flash
+base_url: "https://api.deepseek.com/anthropic"
+max_turns: 50
+thinking_budget: 0
+system_prompt: "You are a helpful assistant." 
+
+# 默认启动 bash file_read file_write file_edit
+tools:
+  - skill
+
+# Compact settings
+time_based_mc_gap: 10.0 # compact minute threshold
+time_based_mc_keep: 3 # keep message count
+disable_time_based_mc: false
+
+use_api_clear_tool_results: false
+use_api_clear_tool_uses: false
+api_max_input_tokens: 180000 # api compact token threshold
+api_target_input_tokens: 40000 # api compact target threshold
+
+# Skills directory (local skill loading path)
+skills_dir: "./skills"
+
+# Auto-compact
+auto_compact_window: 0 # context token windows size
+auto_compact_pct_override: 0 # compact percent threshold
+blocking_limit_override: 0
+disable_compact: false
+disable_auto_compact: false
+
+# Session-memory compact
+sm_compact_min_tokens: 10000
+sm_compact_min_text_block_messages: 5
+sm_compact_max_tokens: 40000
+enable_sm_compact: true
+
+# Memory system (file-based persistent memory)
+enable_memory: true
+memory_dir: "./memory"
+
+# Session persistence (auto-save/load conversation history)
+# Leave empty to use default path: ~/.harness/projects/<cwd>/session.json
+session_file: "./session/a.json"

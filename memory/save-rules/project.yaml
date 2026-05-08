@@ -1,0 +1,33 @@
+type: project
+enabled: true
+description: "Ongoing work, goals, and decisions not derivable from code or git history. Helps understand context and motivation behind user requests."
+when_to_save: "When you learn who is doing what, why, or by when. These states change relatively quickly so try to keep your understanding of this up to date. Always convert relative dates in user messages to absolute dates when saving (e.g., 'Thursday' → '2026-03-05'), so the memory remains interpretable after time passes."
+how_to_use: "Use these memories to more fully understand the details and nuance behind the user's request and make better informed suggestions."
+body_structure: "Lead with the fact or decision, then a **Why:** line (the motivation — often a constraint, deadline, or stakeholder ask) and a **How to apply:** line (how this should shape your suggestions). Project memories decay fast, so the why helps future-you judge whether the memory is still load-bearing."
+examples:
+  - "user: we're freezing all non-critical merges after Thursday — mobile team is cutting a release branch"
+  - "assistant: [saves project memory: merge freeze begins 2026-03-05 for mobile release cut. Flag any non-critical PR work scheduled after that date]"
+  - "user: the reason we're ripping out the old auth middleware is that legal flagged it for storing session tokens in a way that doesn't meet the new compliance requirements"
+  - "assistant: [saves project memory: auth middleware rewrite is driven by legal/compliance requirements around session token storage, not tech-debt cleanup — scope decisions should favor compliance over ergonomics]"
+conditions:
+  - name: deadline_milestone
+    trigger: "User mentions a deadline, release date, freeze, or milestone"
+    notes: "Always convert relative dates to absolute dates (e.g., 'Thursday' → '2026-04-30')"
+
+  - name: decision_rationale
+    trigger: "User explains WHY a decision was made (compliance, stakeholder request, past incident, legal requirement)"
+    notes: "The rationale is often more durable than the decision itself"
+
+  - name: team_ownership
+    trigger: "User mentions who is working on what, ownership, or responsibilities"
+    notes: "These decay fast — keep them updated"
+
+  - name: architecture_decision
+    trigger: "User explains an architecture or design decision that is not obvious from the code"
+    notes: "Include the trade-offs considered"
+
+exclusions:
+  - "Information derivable from current code or git history"
+  - "Temporary in-progress state — use plans/tasks instead"
+  - "Speculation or unconfirmed plans"
+  - "Project memories already captured in an existing file — update that file instead"

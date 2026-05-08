@@ -1,0 +1,28 @@
+type: user
+enabled: true
+description: "Information about the user's role, expertise, and preferences. Use these to tailor your communication style and explanation depth."
+when_to_save: "When you learn any details about the user's role, preferences, responsibilities, or knowledge"
+how_to_use: "When your work should be informed by the user's profile or perspective. For example, if you are asking you to explain a part of the code, you should answer that question in a way that is tailored to the specific details that they will find most valuable or that helps them build their mental model in relation to domain knowledge they already have."
+examples:
+  - "user: I'm a data scientist investigating what logging we have in place"
+  - "assistant: [saves user memory: user is a data scientist, currently focused on observability/logging]"
+  - "user: I've been writing Go for ten years but this is my first time touching the React side of this repo"
+  - "assistant: [saves user memory: deep Go expertise, new to React and this project's frontend — frame frontend explanations in terms of backend analogues]"
+conditions:
+  - name: role_and_expertise
+    trigger: "User mentions their job title, team, responsibilities, or domain expertise (e.g., 'I'm a data scientist', 'I manage the platform team')"
+    notes: "Frame future explanations in terms of their existing knowledge"
+
+  - name: clear_preference
+    trigger: "User states a clear preference about communication style, output format, explanation depth, or workflow"
+    notes: "Examples: terse vs verbose, code-first vs prose-first, prefers bundled PRs"
+
+  - name: long_term_goal
+    trigger: "User mentions career goals, learning objectives, or long-term project ambitions"
+
+exclusions:
+  - "Information that can be inferred from git history or file ownership"
+  - "Negative judgements or irrelevant personal details"
+  - "Preferences already captured in an existing memory file — update that file instead"
+  - "Passing reference to past experience without clear relevance to current work"
+  - "Temporary project assignment or rotation that will change soon"

@@ -1,0 +1,24 @@
+type: reference
+enabled: true
+description: "Pointers to external resources and where to find up-to-date information."
+when_to_save: "When you learn about resources in external systems and their purpose. For example, that bugs are tracked in a specific project in Linear or that feedback can be found in a specific Slack channel."
+how_to_use: "When the user references an external system or information that may be in an external system."
+examples:
+  - 'user: check the Linear project "INGEST" if you want context on these tickets, that''s where we track all pipeline bugs'
+  - "assistant: [saves reference memory: pipeline bugs are tracked in Linear project 'INGEST']"
+  - "user: the Grafana board at grafana.internal/d/api-latency is what oncall watches — if you're touching request handling, that's the thing that'll page someone"
+  - "assistant: [saves reference memory: grafana.internal/d/api-latency is the oncall latency dashboard — check it when editing request-path code]"
+conditions:
+  - name: external_resource
+    trigger: "User mentions a resource in an external system and its purpose (bug tracker project, dashboard, Slack channel, wiki page)"
+    notes: "Include the URL and what it is used for"
+
+  - name: tool_purpose
+    trigger: "User explains the purpose of a tool, script, or internal service and how to access it"
+
+exclusions:
+  - "Public documentation that is easily searchable"
+  - "Links that are likely to break or change"
+  - "References already captured in an existing memory file — update that file instead"
+  - "Generic public documentation link that you could find yourself"
+  - "Link that is likely to expire or change (preview URL, temporary share link)"

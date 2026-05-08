@@ -1,0 +1,6 @@
+skill: calculate
+threshold: 2
+target_memory_type: feedback
+target_memory_name: calculate_feedback
+keywords: ["算数"]
+workflow_mode: true

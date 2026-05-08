@@ -1,0 +1,2 @@
+- [shouzu_feedback](feedback/shouzu_feedback.md) — 收租工作流常见问题修复：智能表格值格式规则、workflow_complete 标记
+- [calculate_feedback](feedback/calculate_feedback.md) — Auto-generated analysis of calculate skill executions — keywords: 算数
