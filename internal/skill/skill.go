@@ -11,14 +11,12 @@ import (
 
 // Skill represents a loaded skill (a prompt with frontmatter metadata).
 type Skill struct {
-	Name                   string
-	Description            string
-	WhenToUse              string
-	Content                string
-	AllowedTools           []string
-	DisableModelInvocation bool
-	UserInvocable          bool
-	SkillRoot              string
+	Name         string
+	Description  string
+	WhenToUse    string
+	Content      string
+	AllowedTools []string
+	SkillRoot    string
 }
 
 // Registry holds loaded skills indexed by name.
@@ -55,13 +53,11 @@ func (r *Registry) All() []*Skill {
 
 // frontmatterData holds the parsed YAML frontmatter from a SKILL.md file.
 type frontmatterData struct {
-	Name                   string   `yaml:"name"`
-	Description            string   `yaml:"description"`
-	WhenToUse              string   `yaml:"when_to_use"`
-	AllowedTools           []string `yaml:"allowed-tools"`
-	DisableModelInvocation bool     `yaml:"disable-model-invocation"`
-	UserInvocable          *bool    `yaml:"user-invocable"`
-	Enabled                *bool    `yaml:"enabled"`
+	Name         string   `yaml:"name"`
+	Description  string   `yaml:"description"`
+	WhenToUse    string   `yaml:"when_to_use"`
+	AllowedTools []string `yaml:"allowed-tools"`
+	Enabled      *bool    `yaml:"enabled"`
 }
 
 // LoadDir loads all skills from a directory.
@@ -140,21 +136,13 @@ func parseSkillFile(skillName, rawContent, skillDir string) (*Skill, error) {
 		description = extractDescriptionFromMarkdown(content)
 	}
 
-	// Default to user-invocable: true unless explicitly set to false.
-	userInvocable := true
-	if fm.UserInvocable != nil {
-		userInvocable = *fm.UserInvocable
-	}
-
 	return &Skill{
-		Name:                   name,
-		Description:            description,
-		WhenToUse:              fm.WhenToUse,
-		Content:                content,
-		AllowedTools:           fm.AllowedTools,
-		DisableModelInvocation: fm.DisableModelInvocation,
-		UserInvocable:          userInvocable,
-		SkillRoot:              skillDir,
+		Name:         name,
+		Description:  description,
+		WhenToUse:    fm.WhenToUse,
+		Content:      content,
+		AllowedTools: fm.AllowedTools,
+		SkillRoot:    skillDir,
 	}, nil
 }
 

@@ -53,10 +53,6 @@ func (t SkillTool) Call(ctx context.Context, input map[string]any) (string, erro
 		return "", fmt.Errorf("unknown skill: %s", skillName)
 	}
 
-	if s.DisableModelInvocation {
-		return "", fmt.Errorf("skill %s cannot be invoked via the skill tool (disable-model-invocation)", skillName)
-	}
-
 	var args string
 	if v, ok := input["args"].(string); ok {
 		args = v
@@ -92,16 +88,13 @@ Important:
 - When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
 - NEVER mention a skill without actually calling this tool
 - Do not invoke a skill that is already running
-- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)
+- Do not use this tool for built-in CLI commands (like /stop, /exit, etc.)
 - If you see a <command-name> tag in the current conversation turn, the skill has ALREADY been loaded - follow the instructions directly instead of calling this tool again
 
 Available skills:
 `)
 
 	for _, s := range t.Registry.All() {
-		if !s.UserInvocable {
-			continue
-		}
 		desc := s.Description
 		if s.WhenToUse != "" {
 			desc = desc + " - " + s.WhenToUse

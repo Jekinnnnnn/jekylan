@@ -8,11 +8,11 @@ import (
 
 func TestSplitFrontmatter(t *testing.T) {
 	tests := []struct {
-		name               string
-		input              string
-		wantFrontmatter    string
-		wantBody           string
-		wantErr            bool
+		name            string
+		input           string
+		wantFrontmatter string
+		wantBody        string
+		wantErr         bool
 	}{
 		{
 			name:            "no frontmatter",
@@ -74,42 +74,6 @@ You are a commit message generator. Look at the staged changes and write a conci
 	}
 	if len(s.AllowedTools) != 2 || s.AllowedTools[0] != "bash" {
 		t.Errorf("AllowedTools = %v", s.AllowedTools)
-	}
-	if !s.UserInvocable {
-		t.Error("expected UserInvocable to be true by default")
-	}
-}
-
-func TestParseSkillFileUserInvocableFalse(t *testing.T) {
-	content := `---
-name: hidden
-description: A hidden skill
-user-invocable: false
----
-Secret content`
-
-	s, err := parseSkillFile("hidden", content, "/skills/hidden")
-	if err != nil {
-		t.Fatalf("parseSkillFile failed: %v", err)
-	}
-	if s.UserInvocable {
-		t.Error("expected UserInvocable to be false")
-	}
-}
-
-func TestParseSkillFileUserInvocableDefault(t *testing.T) {
-	content := `---
-name: default
-description: Default skill
----
-Content`
-
-	s, err := parseSkillFile("default", content, "/skills/default")
-	if err != nil {
-		t.Fatalf("parseSkillFile failed: %v", err)
-	}
-	if !s.UserInvocable {
-		t.Error("expected UserInvocable to default to true")
 	}
 }
 

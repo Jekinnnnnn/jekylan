@@ -64,10 +64,9 @@ func TestGetUsingToolsSection(t *testing.T) {
 func TestBuildSystemPrompt(t *testing.T) {
 	reg := skill.NewRegistry()
 	reg.Register(&skill.Skill{
-		Name:          "test",
-		Description:   "Test skill",
-		Content:       "content",
-		UserInvocable: true,
+		Name:        "test",
+		Description: "Test skill",
+		Content:     "content",
 	})
 	tools := tool.NewRegistry(tool.SkillTool{Registry: reg})
 

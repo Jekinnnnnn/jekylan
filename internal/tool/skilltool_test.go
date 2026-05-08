@@ -10,23 +10,20 @@ import (
 func TestSkillToolSystemPrompt(t *testing.T) {
 	reg := skill.NewRegistry()
 	reg.Register(&skill.Skill{
-		Name:          "commit",
-		Description:   "Generate a git commit message",
-		WhenToUse:     "Use when the user asks to write a commit message",
-		Content:       "Commit content",
-		UserInvocable: true,
+		Name:        "commit",
+		Description: "Generate a git commit message",
+		WhenToUse:   "Use when the user asks to write a commit message",
+		Content:     "Commit content",
 	})
 	reg.Register(&skill.Skill{
-		Name:          "review",
-		Description:   "Review code changes",
-		Content:       "Review content",
-		UserInvocable: true,
+		Name:        "review",
+		Description: "Review code changes",
+		Content:     "Review content",
 	})
 	reg.Register(&skill.Skill{
-		Name:          "hidden",
-		Description:   "Hidden skill",
-		Content:       "Hidden content",
-		UserInvocable: false,
+		Name:        "hidden",
+		Description: "Hidden skill",
+		Content:     "Hidden content",
 	})
 
 	st := SkillTool{Registry: reg}
@@ -74,10 +71,9 @@ func TestSkillToolSystemPromptNilRegistry(t *testing.T) {
 func TestSkillToolSystemPromptTruncatesLongDesc(t *testing.T) {
 	reg := skill.NewRegistry()
 	reg.Register(&skill.Skill{
-		Name:          "long",
-		Description:   strings.Repeat("a", 300),
-		Content:       "content",
-		UserInvocable: true,
+		Name:        "long",
+		Description: strings.Repeat("a", 300),
+		Content:     "content",
 	})
 
 	st := SkillTool{Registry: reg}
