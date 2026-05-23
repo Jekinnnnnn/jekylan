@@ -62,7 +62,7 @@ type StreamEvent struct {
 
 // Client is the common interface for LLM streaming clients.
 type Client interface {
-	StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64) (<-chan StreamEvent, error)
+	StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64, cacheBreakpoints int) (<-chan StreamEvent, error)
 }
 
 // TokenCounter is the interface for exact token counting.
@@ -84,6 +84,16 @@ func (f Factory) NewClient(provider, model, apiKey, baseURL string, maxTokens in
 		return NewOpenAIClient(model, apiKey, baseURL, maxTokens), nil
 	default:
 		return nil, nil
+	}
+}
+
+// NewClientFunc returns a closure that calls f.NewClient with the given
+// fixed provider / apiKey / baseURL / maxTokens, varying only the model.
+// Useful for callers (e.g. agent sub-agent spawners) that need to build a
+// fresh client when a particular agent overrides the engine's default model.
+func (f Factory) NewClientFunc(provider, apiKey, baseURL string, maxTokens int) func(model string) (Client, error) {
+	return func(model string) (Client, error) {
+		return f.NewClient(provider, model, apiKey, baseURL, maxTokens)
 	}
 }
 

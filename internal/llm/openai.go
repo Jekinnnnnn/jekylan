@@ -43,7 +43,7 @@ func (c *OpenAIClient) SetModel(model string) {
 }
 
 // StreamMessages sends a streaming request to the OpenAI API and yields events.
-func (c *OpenAIClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64) (
+func (c *OpenAIClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64, cacheBreakpoints int) (
 	<-chan StreamEvent, error) {
 	out := make(chan StreamEvent)
 
@@ -111,7 +111,9 @@ func (c *OpenAIClient) CountTokens(ctx context.Context, msgs []message.Message, 
 func (c *OpenAIClient) sendEvent(out chan<- StreamEvent, chunk oai.ChatCompletionChunk) {
 	// Usage is sent in a final chunk with empty Choices when
 	// stream_options.include_usage is true.
-	if chunk.Usage.TotalTokens > 0 {
+	// Some providers set PromptTokens/CompletionTokens without TotalTokens,
+	// or only set CachedTokens.
+	if chunk.Usage.TotalTokens > 0 || chunk.Usage.PromptTokens > 0 || chunk.Usage.CompletionTokens > 0 || chunk.Usage.PromptTokensDetails.CachedTokens > 0 {
 		c.recordUsage(chunk.Usage)
 		out <- StreamEvent{
 			Type:                  "usage",
@@ -119,8 +121,9 @@ func (c *OpenAIClient) sendEvent(out chan<- StreamEvent, chunk oai.ChatCompletio
 			UsageCompletionTokens: chunk.Usage.CompletionTokens,
 			UsageTotalTokens:      chunk.Usage.TotalTokens,
 			Usage: &message.Usage{
-				InputTokens:  chunk.Usage.PromptTokens,
-				OutputTokens: chunk.Usage.CompletionTokens,
+				InputTokens:          chunk.Usage.PromptTokens,
+				OutputTokens:         chunk.Usage.CompletionTokens,
+				CacheReadInputTokens: chunk.Usage.PromptTokensDetails.CachedTokens,
 			},
 			ResponseID: chunk.ID,
 		}

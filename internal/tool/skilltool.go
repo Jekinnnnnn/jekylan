@@ -95,6 +95,9 @@ Available skills:
 `)
 
 	for _, s := range t.Registry.All() {
+		if s.WhenToUse == "" {
+			continue // skip non-user-invocable skills
+		}
 		desc := s.Description
 		if s.WhenToUse != "" {
 			desc = desc + " - " + s.WhenToUse

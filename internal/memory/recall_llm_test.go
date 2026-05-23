@@ -18,7 +18,7 @@ type mockLLMClient struct {
 	lastMsgs   []message.Message
 }
 
-func (m *mockLLMClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64) (<-chan llm.StreamEvent, error) {
+func (m *mockLLMClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64, cacheBreakpoints int) (<-chan llm.StreamEvent, error) {
 	m.lastSystem = systemPrompt
 	m.lastMsgs = msgs
 

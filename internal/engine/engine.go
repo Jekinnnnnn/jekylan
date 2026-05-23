@@ -50,6 +50,13 @@ type Engine struct {
 	// When empty, session persistence is disabled.
 	sessionPath string
 
+	// cacheBreakpoints controls Anthropic prompt caching (0=off, 3=max).
+	cacheBreakpoints int
+
+	// coordinatorMode enables coordinator orchestration behavior.
+	// When true, the engine uses coordinator system prompt and tool whitelist.
+	coordinatorMode bool
+
 	// memoryWorker runs in a background goroutine and handles conversation
 	// compaction, skill execution summarization, and skill-collector tracking.
 	memoryWorker *memory.MemoryWorker
@@ -63,6 +70,20 @@ type Engine struct {
 
 	// hasResult indicates whether lastResult is valid.
 	hasResult bool
+
+	// notifyCh receives external notifications (e.g. agent completion
+	// notices from the Coordinator). Consumed by the Run loop.
+	notifyCh chan string
+
+	// usageCh receives external token-usage deltas (e.g. from sub-agents).
+	// Consumed by the Run loop so totalUsage is always updated on the
+	// engine's single goroutine.
+	usageCh chan *message.Usage
+
+	// textBuffer accumulates assistant_text deltas and flushes them
+	// at message boundaries (usage, tool_use, error, result events)
+	// to reduce channel pressure on coordinator output.
+	textBuffer strings.Builder
 }
 
 // EngineOption configures an Engine via functional options.
@@ -84,6 +105,16 @@ func WithSessionPath(path string) EngineOption {
 	return func(e *Engine) { e.sessionPath = path }
 }
 
+// WithCacheBreakpoints sets the number of Anthropic prompt cache breakpoints.
+func WithCacheBreakpoints(n int) EngineOption {
+	return func(e *Engine) { e.cacheBreakpoints = n }
+}
+
+// WithCoordinatorMode enables coordinator orchestration mode.
+func WithCoordinatorMode(enabled bool) EngineOption {
+	return func(e *Engine) { e.coordinatorMode = enabled }
+}
+
 // NewEngine creates a new conversation engine.
 func NewEngine(tools *tool.Registry, model string, maxTurns int, thinkingBudget int64, systemPrompt string, client llm.Client, disableCompact bool, opts ...EngineOption) *Engine {
 	e := &Engine{
@@ -92,22 +123,31 @@ func NewEngine(tools *tool.Registry, model string, maxTurns int, thinkingBudget 
 		model:          model,
 		maxTurns:       maxTurns,
 		thinkingBudget: thinkingBudget,
-		systemPrompt:   buildFullSystemPrompt(systemPrompt, model),
+		systemPrompt:   systemPrompt,
 		client:         client,
 		disableCompact: disableCompact,
+		usageCh:        make(chan *message.Usage, 64),
 	}
 	for _, opt := range opts {
 		opt(e)
 	}
+	if e.coordinatorMode {
+		// Coordinator mode: reduce maxTurns because coordinator delegates work
+		// to workers rather than doing substantive work itself.
+		if e.maxTurns > 10 {
+			e.maxTurns = 10
+		}
+	}
 	if e.memoryDir != "" {
 		e.memoryWorker = memory.NewMemoryWorker(e.memoryDir, func(ctx context.Context, msgs []message.Message, systemPrompt string) <-chan query.Event {
 			return query.Query(ctx, query.Params{
-				Messages:       msgs,
-				SystemPrompt:   systemPrompt,
-				Tools:          e.tools,
-				Client:         e.client,
-				DisableCompact: true,
-				MaxTurns:       3,
+				Messages:         msgs,
+				SystemPrompt:     systemPrompt,
+				Tools:            e.tools,
+				Client:           e.client,
+				DisableCompact:   true,
+				MaxTurns:         3,
+				CacheBreakpoints: e.cacheBreakpoints,
 			})
 		})
 		e.memoryWorker.Start()
@@ -120,6 +160,18 @@ func (e *Engine) Messages() []message.Message {
 }
 
 // TotalUsage returns the cumulative token usage across all turns.
+// Notify sends a notification into the engine's Run loop.
+// Safe to call from any goroutine; the send is non-blocking.
+func (e *Engine) Notify(text string) {
+	if e.notifyCh == nil {
+		return
+	}
+	select {
+	case e.notifyCh <- text:
+	default:
+	}
+}
+
 func (e *Engine) TotalUsage() *message.Usage {
 	if e.totalUsage == nil {
 		return nil
@@ -129,6 +181,21 @@ func (e *Engine) TotalUsage() *message.Usage {
 		OutputTokens:             e.totalUsage.OutputTokens,
 		CacheCreationInputTokens: e.totalUsage.CacheCreationInputTokens,
 		CacheReadInputTokens:     e.totalUsage.CacheReadInputTokens,
+	}
+}
+
+// AddUsage sends an external usage delta into the engine's Run loop.
+// It is safe to call from any goroutine; the send is non-blocking.
+func (e *Engine) AddUsage(u *message.Usage) {
+	if u == nil {
+		return
+	}
+	select {
+	case e.usageCh <- u:
+	default:
+		// Channel full (engine loop is backlogged). Usage is best-effort;
+		// dropping a delta here is preferable to blocking the caller
+		// (e.g. the Coordinator event loop).
 	}
 }
 
@@ -200,7 +267,11 @@ func (e *Engine) injectRelevantMemories(ctx context.Context, prompt string, msgs
 
 	relevant := memory.FindRelevantMemories(ctx, prompt, e.memoryDir, e.surfacedMemories, e.memoryWorker.SkillCollector())
 
+	const maxFileSize = 4096   // skip files larger than 4KB
+	const maxTotalSize = 8192  // cap total injected memory at 8KB
+
 	var memBlocks []string
+	var totalSize int
 	for _, r := range relevant {
 		if e.surfacedMemories[r.Path] {
 			continue
@@ -209,7 +280,14 @@ func (e *Engine) injectRelevantMemories(ctx context.Context, prompt string, msgs
 		if err != nil {
 			continue
 		}
+		if len(data) > maxFileSize {
+			continue
+		}
+		if totalSize+len(data) > maxTotalSize {
+			continue
+		}
 		memBlocks = append(memBlocks, string(data))
+		totalSize += len(data)
 		e.surfacedMemories[r.Path] = true
 	}
 
@@ -242,14 +320,26 @@ type RunOptions struct {
 // In REPL mode (ReadInput != nil) it loops reading input until /quit.
 // In single-shot mode (ReadInput == nil) it processes Prompt once and returns.
 func (e *Engine) Run(opts RunOptions) error {
+	// Initialize notification channel so external senders (e.g. Coordinator)
+	// can inject system notifications into the engine's message stream.
+	if e.notifyCh == nil {
+		e.notifyCh = make(chan string, 8)
+	}
+
 	// Signal handler goroutine — forwards signals to the main loop via quitCh.
 	quitCh := make(chan struct{})
+	sigStop := make(chan struct{})
 	go func() {
 		sigNotify := make(chan os.Signal, 1)
 		signal.Notify(sigNotify, os.Interrupt, syscall.SIGTERM)
-		<-sigNotify
-		close(quitCh)
+		select {
+		case <-sigNotify:
+			close(quitCh)
+		case <-sigStop:
+			signal.Stop(sigNotify)
+		}
 	}()
+	defer close(sigStop)
 
 	if opts.ReadInput == nil {
 		// Single-shot mode: process one prompt and return.
@@ -261,6 +351,12 @@ func (e *Engine) Run(opts RunOptions) error {
 					_ = e.SaveSession(opts.SessionPath)
 				}
 				return nil
+			case notice := <-e.notifyCh:
+				sysMsg := message.Message{Role: message.RoleSystem, Timestamp: time.Now()}
+				sysMsg.AddText(notice)
+				e.messages = append(e.messages, sysMsg)
+			case u := <-e.usageCh:
+				e.accumulateUsage(u)
 			case evt, ok := <-events:
 				if !ok {
 					if e.hasResult && e.memoryWorker != nil {
@@ -341,6 +437,17 @@ func (e *Engine) Run(opts RunOptions) error {
 				events = e.startQuery(opts.Context, text)
 			}
 
+		case notice := <-e.notifyCh:
+			// Inject background agent completion notice into the conversation
+			// so the coordinator sees it on the next turn.
+			sysMsg := message.Message{Role: message.RoleSystem, Timestamp: time.Now()}
+			sysMsg.AddText(notice)
+			e.messages = append(e.messages, sysMsg)
+			opts.OnOutput("\n" + notice + "\n")
+
+		case u := <-e.usageCh:
+			e.accumulateUsage(u)
+
 		case evt, ok := <-events:
 			if !ok {
 				events = nil
@@ -384,6 +491,31 @@ func (e *Engine) repairOrphanToolUses() {
 	if len(toolUses) == 0 {
 		return
 	}
+
+	// Check if the message immediately after the assistant message is already
+	// a repair placeholder for the same tool uses, to avoid duplicates when
+	// startQuery is called repeatedly without a completed turn.
+	if len(e.messages) >= 2 {
+		next := e.messages[len(e.messages)-2]
+		if next.Role == message.RoleUser {
+			results := next.ToolResults()
+			if len(results) == len(toolUses) {
+				matched := 0
+				for _, tu := range toolUses {
+					for _, tr := range results {
+						if tr.ToolUseID == tu.ID {
+							matched++
+							break
+						}
+					}
+				}
+				if matched == len(toolUses) {
+					return
+				}
+			}
+		}
+	}
+
 	repair := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
 	for _, tu := range toolUses {
 		repair.AddToolResult(tu.ID, "[Tool execution interrupted]", true)
@@ -428,26 +560,43 @@ func (e *Engine) startQuery(ctx context.Context, prompt string) <-chan query.Eve
 	// from memory before the latest user message.
 	queryMsgs := e.injectRelevantMemories(queryCtx, prompt, append([]message.Message(nil), e.messages...))
 
-	inner := query.Query(queryCtx, query.Params{
-		Messages:       queryMsgs,
-		SystemPrompt:   BuildSystemPrompt(e.systemPrompt, e.model, e.tools, e.tokenBudget, e.memoryDir),
-		Tools:          e.tools,
-		Model:          e.model,
-		MaxTurns:       e.maxTurns,
-		ThinkingBudget: e.thinkingBudget,
-		Client:         e.client,
-		DisableCompact: e.disableCompact,
-		QuerySource:    "engine",
+	return query.Query(queryCtx, query.Params{
+		Messages:         queryMsgs,
+		SystemPrompt:     BuildSystemPrompt(e.systemPrompt, e.model, e.tools, e.tokenBudget, e.memoryDir),
+		Tools:            e.tools,
+		Model:            e.model,
+		MaxTurns:         e.maxTurns,
+		ThinkingBudget:   e.thinkingBudget,
+		Client:           e.client,
+		DisableCompact:   e.disableCompact,
+		CacheBreakpoints: e.cacheBreakpoints,
+		QuerySource:      "engine",
 	})
+}
 
-	out := make(chan query.Event)
-	go func() {
-		defer close(out)
-		for evt := range inner {
-			out <- evt
-		}
-	}()
-	return out
+// flushText returns the accumulated text buffer content and resets it.
+func (e *Engine) flushText() string {
+	if e.textBuffer.Len() == 0 {
+		return ""
+	}
+	s := e.textBuffer.String()
+	e.textBuffer.Reset()
+	return s
+}
+
+// accumulateUsage adds a usage delta to the engine's cumulative total.
+// Must only be called from the engine's main goroutine.
+func (e *Engine) accumulateUsage(u *message.Usage) {
+	if u == nil {
+		return
+	}
+	if e.totalUsage == nil {
+		e.totalUsage = &message.Usage{}
+	}
+	e.totalUsage.InputTokens += u.InputTokens
+	e.totalUsage.OutputTokens += u.OutputTokens
+	e.totalUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
+	e.totalUsage.CacheReadInputTokens += u.CacheReadInputTokens
 }
 
 // processEvent updates engine state for a single query event and returns the
@@ -457,18 +606,10 @@ func (e *Engine) processEvent(evt query.Event) string {
 	switch evt.Type {
 	case "usage":
 		e.messages = append(e.messages, evt.Message)
-		if u := evt.Message.Usage; u != nil {
-			if e.totalUsage == nil {
-				e.totalUsage = &message.Usage{}
-			}
-			e.totalUsage.InputTokens += u.InputTokens
-			e.totalUsage.OutputTokens += u.OutputTokens
-			e.totalUsage.CacheCreationInputTokens += u.CacheCreationInputTokens
-			e.totalUsage.CacheReadInputTokens += u.CacheReadInputTokens
-		}
+		e.accumulateUsage(evt.Message.Usage)
 		if u := evt.Message.Usage; u != nil {
 			total := u.InputTokens + u.OutputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
-			return fmt.Sprintf("\n[Tokens: input=%d output=%d cache_create=%d cache_read=%d total=%d]\n",
+			return e.flushText() + fmt.Sprintf("\n[Tokens: input=%d output=%d cache_create=%d cache_read=%d total=%d]\n",
 				u.InputTokens, u.OutputTokens, u.CacheCreationInputTokens, u.CacheReadInputTokens, total)
 		}
 
@@ -487,7 +628,8 @@ func (e *Engine) processEvent(evt query.Event) string {
 		return sb.String()
 
 	case "assistant_text":
-		return evt.Text
+		e.textBuffer.WriteString(evt.Text)
+		return ""
 
 	case "assistant_tool_use":
 		e.recordRecentTool(evt.ToolName)
@@ -501,7 +643,7 @@ func (e *Engine) processEvent(evt query.Event) string {
 				sc.OnSkillInvocation(skillName, startIdx)
 			}
 		}
-		return fmt.Sprintf("\n[Tool use: %s(%s)]\n", evt.ToolName, evt.ToolUseID)
+		return e.flushText() + fmt.Sprintf("\n[Tool use: %s(%s)]\n", evt.ToolName, evt.ToolUseID)
 
 	case "compaction_result":
 		e.messages = evt.Messages
@@ -514,14 +656,14 @@ func (e *Engine) processEvent(evt query.Event) string {
 		e.lastResult = evt.Result
 		e.hasResult = true
 		if !evt.Result.Success {
-			return fmt.Sprintf("\nError: %s\n", evt.Result.Error)
+			return e.flushText() + fmt.Sprintf("\nError: %s\n", evt.Result.Error)
 		}
-		return "\n"
+		return e.flushText() + "\n"
 
 	case "error":
 		e.lastResult = evt.Result
 		e.hasResult = true
-		return fmt.Sprintf("\nError: %s\n", evt.Result.Error)
+		return e.flushText() + fmt.Sprintf("\nError: %s\n", evt.Result.Error)
 	}
 
 	return ""

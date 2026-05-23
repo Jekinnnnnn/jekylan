@@ -14,6 +14,15 @@ import (
 	"github.com/Jekinnnnnn/jekylan/internal/tool"
 )
 
+// debugEnabled is initialized once from JEKYLAN_DEBUG env var.
+var debugEnabled = os.Getenv("JEKYLAN_DEBUG") != ""
+
+func debugLog(format string, args ...any) {
+	if debugEnabled {
+		fmt.Fprintf(os.Stderr, "[jekylan-debug] "+format, args...)
+	}
+}
+
 // ErrQueryAborted is returned when the query is interrupted via context cancellation.
 var ErrQueryAborted = fmt.Errorf("query aborted")
 
@@ -28,9 +37,16 @@ type Params struct {
 	Client         llm.Client
 	DisableCompact bool
 	QuerySource    string
+	// CacheBreakpoints controls Anthropic prompt caching breakpoints.
+	// 0 = disabled, 1 = system, 2 = system+tools, 3 = system+tools+messages.
+	CacheBreakpoints int
 	// FallbackModel is the model to switch to when the primary model is
 	// overloaded (Anthropic HTTP 529). Empty disables fallback.
 	FallbackModel string
+	// ConfirmTool is called before executing a risky tool. If non-nil and the
+	// tool is flagged as risky, the callback blocks until the user approves or
+	// rejects the operation. A returned error or !approved aborts the tool call.
+	ConfirmTool func(ctx context.Context, toolName string, input map[string]any) (bool, error)
 }
 
 // Event represents an output from the query loop.
@@ -57,6 +73,36 @@ type Result struct {
 	StopReason string
 	NumTurns   int
 	Error      string
+}
+
+// finalizeToolUse parses accumulated tool input JSON, adds the tool_use
+// to the assistant message, and emits an event. Returns true if a tool_use
+// was finalized.
+func finalizeToolUse(
+	currentToolUse *message.ToolUseBlock,
+	currentToolInputJSON string,
+	assistantMsg *message.Message,
+	out chan<- Event,
+) (*message.ToolUseBlock, bool) {
+	if currentToolUse == nil {
+		return nil, false
+	}
+	if currentToolInputJSON != "" {
+		var inputMap map[string]any
+		if err := json.Unmarshal([]byte(currentToolInputJSON), &inputMap); err != nil {
+			debugLog("tool input JSON parse error: %v\n", err)
+		} else {
+			currentToolUse.Input = inputMap
+		}
+	}
+	assistantMsg.AddToolUse(currentToolUse.ID, currentToolUse.Name, currentToolUse.Input)
+	out <- Event{
+		Type:      "assistant_tool_use",
+		ToolUseID: currentToolUse.ID,
+		ToolName:  currentToolUse.Name,
+		ToolInput: currentToolUse.Input,
+	}
+	return nil, true
 }
 
 // Query runs the multi-turn conversation loop with the LLM API.
@@ -105,11 +151,11 @@ func Query(ctx context.Context, params Params) <-chan Event {
 				// 2. Microcompact
 				mcResult := compact.MicrocompactMessages(msgs)
 				if mcResult.Changed {
-					fmt.Fprintf(os.Stderr, "[jekylan-debug] tri micro compact")
+					debugLog("tri micro compact\n")
 					for _, m := range mcResult.Messages {
 						for _, block := range m.Content {
 							if tr, ok := block.(message.ToolResultBlock); ok {
-								fmt.Fprintf(os.Stderr, "[jekylan-debug] micro tool_result %s: %s\n", tr.ToolUseID, tr.Content)
+								debugLog("micro tool_result %s: %s\n", tr.ToolUseID, tr.Content)
 							}
 						}
 					}
@@ -118,16 +164,16 @@ func Query(ctx context.Context, params Params) <-chan Event {
 
 				// 3. Auto-compact
 				if compact.ShouldAutoCompact(ctx, msgs, params.Model, client, compact.QuerySource(params.QuerySource), snipResult.TokensFreed) {
-					fmt.Fprintf(os.Stderr, "[jekylan-debug] auto-compact starting (turn %d)\n", turnCount)
+					debugLog("auto-compact starting (turn %d)\n", turnCount)
 					wasCompacted, compactResult, nextFailures, err := compact.AutoCompactIfNeeded(ctx, msgs, params.Model, client, compact.QuerySource(params.QuerySource), &autoCompactTracking, snipResult.TokensFreed)
 					autoCompactTracking.ConsecutiveFailures = nextFailures
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "[jekylan-debug] auto-compact error: %v\n", err)
+						debugLog("auto-compact error: %v\n", err)
 						out <- Event{Type: "error", Result: Result{Error: fmt.Sprintf("autocompact failed: %v", err)}}
 						return
 					}
 					if wasCompacted && compactResult != nil {
-						fmt.Fprintf(os.Stderr, "[jekylan-debug] auto-compact success: %d -> %d messages\n", len(msgs), len(compactResult.Messages))
+						debugLog("auto-compact success: %d -> %d messages\n", len(msgs), len(compactResult.Messages))
 						msgs = compactResult.Messages
 						out <- Event{Type: "compaction_result", Messages: compactResult.Messages}
 						autoCompactTracking.Compacted = true
@@ -165,7 +211,7 @@ func Query(ctx context.Context, params Params) <-chan Event {
 				attemptWithFallback = false
 				isPTL = false
 
-				stream, err := client.StreamMessages(ctx, msgs, params.SystemPrompt, params.Tools, params.ThinkingBudget)
+				stream, err := client.StreamMessages(ctx, msgs, params.SystemPrompt, params.Tools, params.ThinkingBudget, params.CacheBreakpoints)
 				if err != nil {
 					if llm.IsPromptTooLongError(err) {
 						assistantMsg = newPromptTooLongAssistantMessage(err)
@@ -235,6 +281,8 @@ func Query(ctx context.Context, params Params) <-chan Event {
 							currentRedacted = evt.BlockRedacted
 						}
 					case "assistant_text":
+						// Same text-delta handling as content_block_delta below;
+						// duplicated because Anthropic and OpenAI use different event types.
 						if evt.TextDelta != "" {
 							currentText += evt.TextDelta
 							out <- Event{Type: "assistant_text", Text: evt.TextDelta}
@@ -265,25 +313,11 @@ func Query(ctx context.Context, params Params) <-chan Event {
 					case "content_block_stop":
 						switch currentBlockType {
 						case "tool_use":
-							if currentToolInputJSON != "" {
-								var inputMap map[string]any
-								if err := json.Unmarshal([]byte(currentToolInputJSON), &inputMap); err != nil {
-									fmt.Fprintf(os.Stderr, "[jekylan-debug] tool input JSON parse error: %v\n", err)
-								} else {
-									currentToolUse.Input = inputMap
-								}
+							var finalized bool
+							currentToolUse, finalized = finalizeToolUse(currentToolUse, currentToolInputJSON, &assistantMsg, out)
+							if finalized {
+								hasToolUse = true
 							}
-							assistantMsg.AddToolUse(currentToolUse.ID, currentToolUse.Name, currentToolUse.Input)
-							hasToolUse = true
-							// Emit the event with the fully-parsed input so downstream
-							// handlers (e.g. skill collector) can inspect final args.
-							out <- Event{
-								Type:      "assistant_tool_use",
-								ToolUseID: currentToolUse.ID,
-								ToolName:  currentToolUse.Name,
-								ToolInput: currentToolUse.Input,
-							}
-							currentToolUse = nil
 							currentToolInputJSON = ""
 						case "thinking":
 							assistantMsg.Content = append(assistantMsg.Content, message.ThinkingBlock{
@@ -333,25 +367,11 @@ func Query(ctx context.Context, params Params) <-chan Event {
 
 				// OpenAI may have pending tool_use that was never closed by content_block_stop
 				if currentToolUse != nil {
-					if currentToolInputJSON != "" {
-						var inputMap map[string]any
-						if err := json.Unmarshal([]byte(currentToolInputJSON), &inputMap); err != nil {
-								fmt.Fprintf(os.Stderr, "[jekylan-debug] tool input JSON parse error: %v\n", err)
-						} else {
-							currentToolUse.Input = inputMap
-						}
+					var finalized bool
+					currentToolUse, finalized = finalizeToolUse(currentToolUse, currentToolInputJSON, &assistantMsg, out)
+					if finalized {
+						hasToolUse = true
 					}
-					assistantMsg.AddToolUse(currentToolUse.ID, currentToolUse.Name, currentToolUse.Input)
-					hasToolUse = true
-					// Emit the event with the fully-parsed input so downstream
-					// handlers (e.g. skill collector) can inspect final args.
-					out <- Event{
-						Type:      "assistant_tool_use",
-						ToolUseID: currentToolUse.ID,
-						ToolName:  currentToolUse.Name,
-						ToolInput: currentToolUse.Input,
-					}
-					currentToolUse = nil
 					currentToolInputJSON = ""
 				}
 
@@ -446,12 +466,25 @@ func Query(ctx context.Context, params Params) <-chan Event {
 						result = fmt.Sprintf("Tool %q not found", block.Name)
 						isErr = true
 					} else {
-						r, err := t.Call(ctx, block.Input)
-						if err != nil {
-							result = err.Error()
-							isErr = true
-						} else {
-							result = r
+						// Check if tool requires user confirmation.
+						if params.ConfirmTool != nil && isRiskyTool(block.Name) {
+							approved, err := params.ConfirmTool(ctx, block.Name, block.Input)
+							if err != nil {
+								result = fmt.Sprintf("confirmation cancelled: %v", err)
+								isErr = true
+							} else if !approved {
+								result = fmt.Sprintf("tool %q was not approved by user", block.Name)
+								isErr = true
+							}
+						}
+						if !isErr {
+							r, err := t.Call(ctx, block.Input)
+							if err != nil {
+								result = err.Error()
+								isErr = true
+							} else {
+								result = r
+							}
 						}
 					}
 					resultCh <- indexedToolResult{idx: idx, toolUseID: block.ID, result: result, isErr: isErr}
@@ -497,9 +530,13 @@ func newPromptTooLongAssistantMessageFromText(text string) message.Message {
 	return msg
 }
 
-// mergeUsage merges non-zero fields from src into dst. If dst is nil, src is
-// returned directly. This prevents input_tokens from message_start being
-// overwritten by output-only usage in message_delta.
+// mergeUsage merges non-zero fields from src into dst using overwrite (not
+// additive) semantics. If dst is nil, src is returned directly.
+//
+// Overwrite is correct for Anthropic: message_start reports input_tokens,
+// message_delta reports output_tokens — fields are mutually exclusive across
+// events. For OpenAI, the final usage chunk contains the complete breakdown,
+// so a single merge call suffices.
 func mergeUsage(dst, src *message.Usage) *message.Usage {
 	if src == nil {
 		return dst
@@ -520,4 +557,15 @@ func mergeUsage(dst, src *message.Usage) *message.Usage {
 		dst.CacheReadInputTokens = src.CacheReadInputTokens
 	}
 	return dst
+}
+
+// isRiskyTool returns true for tools that may modify state or execute
+// arbitrary commands and should require user confirmation.
+func isRiskyTool(name string) bool {
+	switch name {
+	case "bash", "file_write", "file_edit", "confirm":
+		return true
+	default:
+		return false
+	}
 }

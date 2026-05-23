@@ -47,6 +47,7 @@ func (r *Registry) All() []Tool {
 }
 
 // ToAnthropicSDK converts the registry's tools to Anthropic SDK ToolUnion format.
+// The last tool gets a cache_control breakpoint for prompt caching.
 func (r *Registry) ToAnthropicSDK() []anthropic.ToolUnionParam {
 	out := make([]anthropic.ToolUnionParam, 0, len(r.tools))
 	for _, t := range r.tools {
@@ -57,6 +58,13 @@ func (r *Registry) ToAnthropicSDK() []anthropic.ToolUnionParam {
 				InputSchema: anthropic.ToolInputSchemaParam{ExtraFields: t.InputSchema()},
 			},
 		})
+	}
+	// Place a cache breakpoint on the last tool definition.
+	if len(out) > 0 {
+		last := &out[len(out)-1]
+		if last.OfTool != nil {
+			last.OfTool.CacheControl = anthropic.NewCacheControlEphemeralParam()
+		}
 	}
 	return out
 }
@@ -74,4 +82,34 @@ func (r *Registry) ToOpenAISDK() []oai.ChatCompletionToolParam {
 		})
 	}
 	return out
+}
+
+// Subset returns a new Registry containing only tools whose names are in
+// allow, minus any whose names are in deny. allow=["*"] means all tools
+// except those in deny.
+func (r *Registry) Subset(allow, deny []string) *Registry {
+	hasDeny := make(map[string]bool, len(deny))
+	for _, d := range deny {
+		hasDeny[d] = true
+	}
+
+	var out []Tool
+	if len(allow) == 1 && allow[0] == "*" {
+		for _, t := range r.tools {
+			if !hasDeny[t.Name()] {
+				out = append(out, t)
+			}
+		}
+	} else {
+		hasAllow := make(map[string]bool, len(allow))
+		for _, a := range allow {
+			hasAllow[a] = true
+		}
+		for _, t := range r.tools {
+			if hasAllow[t.Name()] && !hasDeny[t.Name()] {
+				out = append(out, t)
+			}
+		}
+	}
+	return NewRegistry(out...)
 }

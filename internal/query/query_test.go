@@ -2,6 +2,7 @@ package query
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ type stubClient struct {
 	streamFn func(ctx context.Context) (<-chan llm.StreamEvent, error)
 }
 
-func (s *stubClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64) (<-chan llm.StreamEvent, error) {
+func (s *stubClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64, cacheBreakpoints int) (<-chan llm.StreamEvent, error) {
 	return s.streamFn(ctx)
 }
 
@@ -193,5 +194,220 @@ func TestCancelAfterUsageMultipleToolUses(t *testing.T) {
 		if !tr.IsError {
 			t.Errorf("content[%d] IsError: want true", i)
 		}
+	}
+}
+
+// confirmTool is a minimal tool for testing ConfirmTool callbacks.
+type confirmTestTool struct{ name string }
+
+func (f confirmTestTool) Name() string        { return f.name }
+func (f confirmTestTool) Description() string { return "desc " + f.name }
+func (f confirmTestTool) InputSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (f confirmTestTool) Call(ctx context.Context, input map[string]any) (string, error) {
+	return "executed", nil
+}
+func (f confirmTestTool) SystemPrompt() string { return "" }
+
+// TestQuery_ConfirmToolBlocksExecution verifies that when ConfirmTool is set
+// and the assistant emits a tool_use, the callback is invoked before the tool
+// is executed. If the callback returns !approved, the tool result is an error.
+func TestQuery_ConfirmToolBlocksExecution(t *testing.T) {
+	const toolUseID = "call_confirm_test_1"
+
+	streamFn := func(ctx context.Context) (<-chan llm.StreamEvent, error) {
+		ch := make(chan llm.StreamEvent, 8)
+		ch <- llm.StreamEvent{Type: "message_start"}
+		ch <- llm.StreamEvent{
+			Type:      "content_block_start",
+			BlockType: "tool_use",
+			BlockID:   toolUseID,
+			BlockName: "bash",
+		}
+		ch <- llm.StreamEvent{Type: "content_block_stop"}
+		ch <- llm.StreamEvent{Type: "message_delta", StopReason: "tool_use"}
+		close(ch)
+		return ch, nil
+	}
+
+	stub := &stubClient{streamFn: streamFn}
+
+	var confirmCalled bool
+	confirmTool := func(ctx context.Context, toolName string, input map[string]any) (bool, error) {
+		confirmCalled = true
+		return false, nil // reject
+	}
+
+	user := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
+	user.AddText("test")
+
+	// Provide a registry with a bash tool so the tool is found and ConfirmTool
+	// is reached. The tool itself is never executed because ConfirmTool rejects.
+	bashTool := confirmTestTool{name: "bash"}
+
+	events := Query(context.Background(), Params{
+		Messages:       []message.Message{user},
+		Client:         stub,
+		Tools:          tool.NewRegistry(bashTool),
+		DisableCompact: true,
+		ConfirmTool:    confirmTool,
+	})
+
+	var sawUserMsg bool
+	var toolResult message.ToolResultBlock
+	for evt := range events {
+		if evt.Type == "user_message" {
+			sawUserMsg = true
+			tr := evt.Message.ToolResults()
+			if len(tr) > 0 {
+				toolResult = tr[0]
+			}
+		}
+	}
+
+	if !confirmCalled {
+		t.Fatal("expected ConfirmTool to be called")
+	}
+	if !sawUserMsg {
+		t.Fatal("expected user_message with tool result")
+	}
+	if toolResult.ToolUseID != toolUseID {
+		t.Fatalf("expected tool_use_id %q, got %q", toolUseID, toolResult.ToolUseID)
+	}
+	if !toolResult.IsError {
+		t.Fatal("expected tool result to be an error (rejected)")
+	}
+	if !strings.Contains(toolResult.Content, "not approved") {
+		t.Fatalf("expected 'not approved' in result, got: %q", toolResult.Content)
+	}
+}
+
+// TestQuery_OpenAITextOnly verifies the OpenAI streaming path where text arrives
+// as assistant_text events without content_block_start/stop boundaries.
+func TestQuery_OpenAITextOnly(t *testing.T) {
+	streamFn := func(ctx context.Context) (<-chan llm.StreamEvent, error) {
+		ch := make(chan llm.StreamEvent, 8)
+		ch <- llm.StreamEvent{Type: "assistant_text", TextDelta: "Hello "}
+		ch <- llm.StreamEvent{Type: "assistant_text", TextDelta: "world"}
+		ch <- llm.StreamEvent{Type: "message_delta", StopReason: "stop"}
+		close(ch)
+		return ch, nil
+	}
+
+	stub := &stubClient{streamFn: streamFn}
+
+	user := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
+	user.AddText("hi")
+
+	events := Query(context.Background(), Params{
+		Messages:       []message.Message{user},
+		Client:         stub,
+		Tools:          tool.NewRegistry(),
+		DisableCompact: true,
+	})
+
+	var textDeltas []string
+	var sawUsage, sawResult bool
+	var result Result
+	for evt := range events {
+		switch evt.Type {
+		case "assistant_text":
+			textDeltas = append(textDeltas, evt.Text)
+		case "usage":
+			sawUsage = true
+		case "result":
+			sawResult = true
+			result = evt.Result
+		}
+	}
+
+	if !sawResult {
+		t.Fatal("expected result event")
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got error: %s", result.Error)
+	}
+	if result.Text != "Hello world" {
+		t.Fatalf("expected 'Hello world', got %q", result.Text)
+	}
+	if len(textDeltas) != 2 || textDeltas[0] != "Hello " || textDeltas[1] != "world" {
+		t.Fatalf("expected 2 text deltas, got %v", textDeltas)
+	}
+	if !sawUsage {
+		t.Fatal("expected usage event")
+	}
+}
+
+// TestQuery_OpenAIToolUse verifies the OpenAI path where tool calls arrive as
+// assistant_tool_use events (no content_block_start/stop).
+func TestQuery_OpenAIToolUse(t *testing.T) {
+	callCount := 0
+	streamFn := func(ctx context.Context) (<-chan llm.StreamEvent, error) {
+		callCount++
+		ch := make(chan llm.StreamEvent, 8)
+		if callCount == 1 {
+			// First call: emit a tool_use
+			ch <- llm.StreamEvent{
+				Type:      "assistant_tool_use",
+				ToolUseID: "call_oai_1",
+				ToolName:  "bash",
+				InputJSON: `{"command":"echo hi"}`,
+			}
+			ch <- llm.StreamEvent{Type: "message_delta", StopReason: "tool_calls"}
+		} else {
+			// Second call: plain text response after tool execution
+			ch <- llm.StreamEvent{Type: "assistant_text", TextDelta: "Done!"}
+			ch <- llm.StreamEvent{Type: "message_delta", StopReason: "stop"}
+		}
+		close(ch)
+		return ch, nil
+	}
+
+	stub := &stubClient{streamFn: streamFn}
+
+	user := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
+	user.AddText("run echo")
+
+	bashTool := confirmTestTool{name: "bash"}
+
+	events := Query(context.Background(), Params{
+		Messages:       []message.Message{user},
+		Client:         stub,
+		Tools:          tool.NewRegistry(bashTool),
+		DisableCompact: true,
+	})
+
+	var sawToolUse, sawUserMsg, sawResult bool
+	var toolResultContent string
+	for evt := range events {
+		switch evt.Type {
+		case "assistant_tool_use":
+			sawToolUse = true
+			if evt.ToolName != "bash" {
+				t.Fatalf("expected tool name 'bash', got %q", evt.ToolName)
+			}
+		case "user_message":
+			sawUserMsg = true
+			trs := evt.Message.ToolResults()
+			if len(trs) > 0 {
+				toolResultContent = trs[0].Content
+			}
+		case "result":
+			sawResult = true
+		}
+	}
+
+	if !sawToolUse {
+		t.Fatal("expected assistant_tool_use event")
+	}
+	if !sawUserMsg {
+		t.Fatal("expected user_message with tool result")
+	}
+	if toolResultContent != "executed" {
+		t.Fatalf("expected 'executed', got %q", toolResultContent)
+	}
+	if !sawResult {
+		t.Fatal("expected result event after tool execution")
 	}
 }

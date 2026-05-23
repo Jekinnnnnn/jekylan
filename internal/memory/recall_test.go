@@ -33,6 +33,12 @@ React patterns.`
 		t.Fatal(err)
 	}
 
+	// Create MEMORY.md referencing both files
+	memIdx := "- [Go](go.md) — Go expert\n- [React](react.md) — React tips\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte(memIdx), 0644); err != nil {
+		t.Fatal(err)
+	}
+
 	// Query matching "go" should return go.md
 	results := FindRelevantMemories(ctx, "I need help with Go code", tmpDir, nil, nil)
 	foundGo := false

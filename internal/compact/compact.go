@@ -59,7 +59,7 @@ func streamCompactSummary(ctx context.Context, client llm.Client, model string, 
 	summaryReq.AddText(compactPrompt)
 	summaryMsgs := append(append([]message.Message(nil), msgs...), summaryReq)
 
-	stream, err := client.StreamMessages(ctx, summaryMsgs, compactSystemPrompt, nil, 0)
+	stream, err := client.StreamMessages(ctx, summaryMsgs, compactSystemPrompt, nil, 0, 0)
 	if err != nil {
 		return "", err
 	}

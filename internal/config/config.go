@@ -49,6 +49,12 @@ type Config struct {
 	AgentEnabled bool   `yaml:"agent_enabled,omitempty"`
 	AgentsDir    string `yaml:"agents_dir,omitempty"`
 
+	// Playbook directory (default: "playbooks")
+	PlaybookDir string `yaml:"playbook_dir,omitempty"`
+
+	// Debug enables verbose sub-agent process output.
+	Debug bool `yaml:"debug,omitempty"`
+
 	// Token budget (reserved for future implementation)
 	// Supports human-readable formats like "500K", "1M", "2.5M".
 	TokenBudget string `yaml:"token_budget,omitempty"`

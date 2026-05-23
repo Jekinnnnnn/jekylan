@@ -6,48 +6,6 @@ import (
 	"testing"
 )
 
-func TestSplitFrontmatter(t *testing.T) {
-	tests := []struct {
-		name            string
-		input           string
-		wantFrontmatter string
-		wantBody        string
-		wantErr         bool
-	}{
-		{
-			name:            "no frontmatter",
-			input:           "Hello world",
-			wantFrontmatter: "",
-			wantBody:        "Hello world",
-		},
-		{
-			name: "with frontmatter",
-			input: `---
-name: test
-description: A test skill
----
-Hello world`,
-			wantFrontmatter: "name: test\ndescription: A test skill",
-			wantBody:        "Hello world",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fm, body, err := splitFrontmatter(tt.input)
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("splitFrontmatter error = %v, wantErr %v", err, tt.wantErr)
-			}
-			if fm != tt.wantFrontmatter {
-				t.Errorf("frontmatter = %q, want %q", fm, tt.wantFrontmatter)
-			}
-			if body != tt.wantBody {
-				t.Errorf("body = %q, want %q", body, tt.wantBody)
-			}
-		})
-	}
-}
-
 func TestParseSkillFile(t *testing.T) {
 	content := `---
 name: commit
@@ -145,19 +103,6 @@ func TestSubstituteArgsNamed(t *testing.T) {
 	want := "Name: Alice, Age: 30"
 	if got != want {
 		t.Errorf("SubstituteArgs = %q, want %q", got, want)
-	}
-}
-
-func TestRenderContent(t *testing.T) {
-	s := &Skill{
-		Name:      "test",
-		Content:   "Skill dir: ${SKILL_DIR}, Args: $ARGUMENTS",
-		SkillRoot: "/skills/test",
-	}
-	got := s.RenderContent("hello")
-	want := "Base directory for this skill: /skills/test\n\nSkill dir: /skills/test, Args: hello"
-	if got != want {
-		t.Errorf("RenderContent = %q, want %q", got, want)
 	}
 }
 

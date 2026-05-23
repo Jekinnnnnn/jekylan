@@ -7,8 +7,96 @@ import (
 	"testing"
 )
 
+func TestParseEntrypointLinks(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// No MEMORY.md → nil
+	links := ParseEntrypointLinks(tmpDir)
+	if links != nil {
+		t.Error("expected nil when MEMORY.md doesn't exist")
+	}
+
+	// Empty MEMORY.md → empty map
+	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	links = ParseEntrypointLinks(tmpDir)
+	if len(links) != 0 {
+		t.Error("expected empty map for empty MEMORY.md")
+	}
+
+	// MEMORY.md with links
+	content := `- [User](user_role.md) — user is a senior Go engineer
+- [React](feedback/react.md) — React tips
+- [Project](project/init.md) — project setup notes
+`
+	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	links = ParseEntrypointLinks(tmpDir)
+	if len(links) != 3 {
+		t.Fatalf("expected 3 links, got %d", len(links))
+	}
+	for _, path := range []string{"user_role.md", "feedback/react.md", "project/init.md"} {
+		if !links[path] {
+			t.Errorf("expected link %q to be found", path)
+		}
+	}
+}
+
+func TestScanMemoryFilesOnlyIndexed(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create MEMORY.md referencing only user_role.md
+	memIdx := "- [User](user_role.md) — user role\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte(memIdx), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a referenced file
+	referenced := `---
+name: user_role
+description: User is a senior Go engineer
+type: user
+---
+
+User writes Go.`
+	if err := os.WriteFile(filepath.Join(tmpDir, "user_role.md"), []byte(referenced), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create an unreferenced file (simulates skill-executions)
+	os.MkdirAll(filepath.Join(tmpDir, "skill-executions"), 0755)
+	unref := `---
+skill: test
+date: 2026-05-01
+---
+
+Execution log content.`
+	if err := os.WriteFile(filepath.Join(tmpDir, "skill-executions", "log.md"), []byte(unref), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	headers, err := ScanMemoryFiles(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(headers) != 1 {
+		t.Fatalf("expected 1 header (only indexed file), got %d", len(headers))
+	}
+	if headers[0].Filename != "user_role.md" {
+		t.Errorf("expected user_role.md, got %q", headers[0].Filename)
+	}
+}
+
 func TestScanMemoryFiles(t *testing.T) {
 	tmpDir := t.TempDir()
+
+	// Create MEMORY.md referencing both files
+	memIdx := "- [User](user_role.md) — user role\n- [Plain](plain.md) — plain notes\n"
+	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte(memIdx), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a memory file with frontmatter
 	content := `---
@@ -20,11 +108,6 @@ type: user
 User has been writing Go for 10 years.
 `
 	if err := os.WriteFile(filepath.Join(tmpDir, "user_role.md"), []byte(content), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create MEMORY.md (should be excluded)
-	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte("- [User](user_role.md)"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,7 +124,6 @@ User has been writing Go for 10 years.
 		t.Fatalf("expected 2 headers, got %d", len(headers))
 	}
 
-	// Should be sorted newest-first
 	foundUser := false
 	for _, h := range headers {
 		if h.Filename == "user_role.md" {
@@ -89,39 +171,3 @@ func TestFormatMemoryManifest(t *testing.T) {
 	}
 }
 
-func TestExtractFirstParagraph(t *testing.T) {
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"First line.\n\nSecond paragraph.", "First line."},
-		{"# Header\n\nBody text.", "Body text."},
-		{"", ""},
-		{"\n\n\n", ""},
-	}
-	for _, tc := range tests {
-		got := extractFirstParagraph(tc.input)
-		if got != tc.want {
-			t.Errorf("extractFirstParagraph(%q) = %q, want %q", tc.input, got, tc.want)
-		}
-	}
-}
-
-func TestSplitFrontmatter(t *testing.T) {
-	content := "---\nname: test\n---\n\nBody here."
-	fm, body := splitFrontmatter(content)
-	if fm != "name: test" {
-		t.Errorf("expected frontmatter 'name: test', got %q", fm)
-	}
-	if body != "Body here." {
-		t.Errorf("expected body 'Body here.', got %q", body)
-	}
-
-	noFM, body2 := splitFrontmatter("Just body.")
-	if noFM != "" {
-		t.Error("expected empty frontmatter")
-	}
-	if body2 != "Just body." {
-		t.Error("expected body without frontmatter")
-	}
-}

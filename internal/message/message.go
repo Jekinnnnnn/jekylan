@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -92,6 +93,16 @@ type Usage struct {
 	CacheReadInputTokens     int64
 }
 
+// String returns a compact representation of token usage, including cache
+// statistics when present.
+func (u Usage) String() string {
+	s := fmt.Sprintf("input=%d output=%d", u.InputTokens, u.OutputTokens)
+	if u.CacheCreationInputTokens > 0 || u.CacheReadInputTokens > 0 {
+		s += fmt.Sprintf(" cache_create=%d cache_read=%d", u.CacheCreationInputTokens, u.CacheReadInputTokens)
+	}
+	return s
+}
+
 // Message is a single turn in the conversation.
 type Message struct {
 	Role       Role
@@ -101,9 +112,13 @@ type Message struct {
 	ResponseID   string
 	APIError     string // non-empty when this assistant message represents an API error
 	ErrorDetails string // raw error details for API error messages
+	// CacheBreakpoint, when true, marks the last text block in this message
+	// with a cache_control breakpoint for Anthropic prompt caching.
+	CacheBreakpoint bool
 }
 
 // ToAnthropicMessage converts the message to an Anthropic SDK MessageParam.
+// If CacheBreakpoint is true, the last text block gets a cache_control marker.
 func (m Message) ToAnthropicMessage() sdk.MessageParam {
 	blocks := make([]sdk.ContentBlockParamUnion, len(m.Content))
 	for i, c := range m.Content {
@@ -118,6 +133,14 @@ func (m Message) ToAnthropicMessage() sdk.MessageParam {
 			blocks[i] = b.ToAnthropicBlock()
 		case RedactedThinkingBlock:
 			blocks[i] = b.ToAnthropicBlock()
+		}
+	}
+	if m.CacheBreakpoint {
+		for i := len(blocks) - 1; i >= 0; i-- {
+			if blocks[i].OfText != nil {
+				blocks[i].OfText.CacheControl = sdk.NewCacheControlEphemeralParam()
+				break
+			}
 		}
 	}
 	switch m.Role {

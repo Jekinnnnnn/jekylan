@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Jekinnnnnn/jekylan/internal/markdownutil"
 	"gopkg.in/yaml.v3"
 )
+
+var linkPattern = regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`)
 
 const (
 	maxMemoryFiles      = 200
@@ -32,10 +36,29 @@ type frontmatterData struct {
 	Type        string `yaml:"type"`
 }
 
-// ScanMemoryFiles scans a memory directory recursively for .md files, reads their
-// frontmatter, and returns a header list sorted newest-first
+// ParseEntrypointLinks reads MEMORY.md and extracts all markdown link paths
+// like [Title](path.md), returning a set of relative paths.
+func ParseEntrypointLinks(memoryDir string) map[string]bool {
+	data, err := os.ReadFile(filepath.Join(memoryDir, entrypointName))
+	if err != nil {
+		return nil
+	}
+	links := make(map[string]bool)
+	for _, match := range linkPattern.FindAllStringSubmatch(string(data), -1) {
+		links[match[1]] = true
+	}
+	return links
+}
+
+// ScanMemoryFiles scans a memory directory recursively for .md files listed in
+// MEMORY.md, reads their frontmatter, and returns a header list sorted newest-first
 // (capped at maxMemoryFiles).
 func ScanMemoryFiles(memoryDir string) ([]MemoryHeader, error) {
+	allowed := ParseEntrypointLinks(memoryDir)
+	if len(allowed) == 0 {
+		return nil, nil
+	}
+
 	var headers []MemoryHeader
 	var walk func(dir string) error
 	walk = func(dir string) error {
@@ -46,7 +69,6 @@ func ScanMemoryFiles(memoryDir string) ([]MemoryHeader, error) {
 			}
 			return err
 		}
-		headers = make([]MemoryHeader, 0, len(entries))
 		for _, entry := range entries {
 			path := filepath.Join(dir, entry.Name())
 			if entry.IsDir() {
@@ -59,6 +81,10 @@ func ScanMemoryFiles(memoryDir string) ([]MemoryHeader, error) {
 			if !strings.HasSuffix(name, ".md") || name == entrypointName {
 				continue
 			}
+			relPath, _ := filepath.Rel(memoryDir, path)
+			if !allowed[relPath] {
+				continue
+			}
 			info, err := os.Stat(path)
 			if err != nil {
 				continue
@@ -67,17 +93,15 @@ func ScanMemoryFiles(memoryDir string) ([]MemoryHeader, error) {
 			if err != nil {
 				continue
 			}
-			fm, body := splitFrontmatter(content)
+			fm, body, _ := markdownutil.SplitFrontmatter(content)
 			var fd frontmatterData
 			if fm != "" {
 				_ = yaml.Unmarshal([]byte(fm), &fd)
 			}
 			desc := fd.Description
 			if desc == "" {
-				desc = extractFirstParagraph(body)
+				desc = markdownutil.ExtractDescriptionFromMarkdown(body)
 			}
-			// Use relative path from memoryDir as the Filename for display.
-			relPath, _ := filepath.Rel(memoryDir, path)
 			headers = append(headers, MemoryHeader{
 				Filename:    relPath,
 				FilePath:    path,
@@ -136,39 +160,3 @@ func readFileInRange(filePath string, maxLines int) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-// splitFrontmatter splits a markdown file into YAML frontmatter and body.
-func splitFrontmatter(content string) (frontmatter, body string) {
-	trimmed := strings.TrimSpace(content)
-	if !strings.HasPrefix(trimmed, "---") {
-		return "", content
-	}
-	parts := strings.SplitN(trimmed, "---", 3)
-	if len(parts) < 3 {
-		return "", content
-	}
-	return strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
-}
-
-// extractFirstParagraph extracts the first non-empty paragraph from markdown content.
-func extractFirstParagraph(content string) string {
-	lines := strings.Split(content, "\n")
-	var para strings.Builder
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			if para.Len() > 0 {
-				break
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		para.WriteString(trimmed)
-		para.WriteString(" ")
-		if para.Len() > 200 {
-			break
-		}
-	}
-	return strings.TrimSpace(para.String())
-}

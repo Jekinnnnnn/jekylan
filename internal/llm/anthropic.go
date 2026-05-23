@@ -49,12 +49,23 @@ func (c *AnthropicClient) SetModel(model string) {
 }
 
 // StreamMessages sends a streaming request to the Anthropic API and yields events.
-func (c *AnthropicClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64) (<-chan StreamEvent, error) {
+// cacheBreakpoints controls how many cache_control breakpoints are inserted:
+//   0 = none, 1 = system prompt, 2 = system + tools, 3 = system + tools + message prefix.
+func (c *AnthropicClient) StreamMessages(ctx context.Context, msgs []message.Message, systemPrompt string, tools *tool.Registry, thinkingBudget int64, cacheBreakpoints int) (<-chan StreamEvent, error) {
 	out := make(chan StreamEvent)
 
 	params := sdk.MessageNewParams{
 		MaxTokens: int64(c.maxTokens),
 		Model:     c.model,
+	}
+
+	// Mark a message for cache breakpoint if requested.
+	if cacheBreakpoints >= 3 && len(msgs) >= 3 {
+		idx := len(msgs) - 3
+		if idx >= 0 {
+			msgs[idx].CacheBreakpoint = true
+			defer func() { msgs[idx].CacheBreakpoint = false }()
+		}
 	}
 
 	for i, m := range msgs {
@@ -66,6 +77,9 @@ func (c *AnthropicClient) StreamMessages(ctx context.Context, msgs []message.Mes
 
 	if systemPrompt != "" {
 		params.System = []sdk.TextBlockParam{{Text: systemPrompt}}
+		if cacheBreakpoints >= 1 {
+			params.System[0].CacheControl = sdk.NewCacheControlEphemeralParam()
+		}
 	}
 
 	if tools != nil {

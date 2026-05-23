@@ -372,3 +372,150 @@ func TestFileStateTracker(t *testing.T) {
 		t.Error("expected state to be removed")
 	}
 }
+
+// --- Registry.Subset tests ---
+
+type fakeTool struct{ name string }
+
+func (f fakeTool) Name() string        { return f.name }
+func (f fakeTool) Description() string { return "desc " + f.name }
+func (f fakeTool) InputSchema() map[string]any {
+	return map[string]any{"type": "object"}
+}
+func (f fakeTool) Call(ctx context.Context, input map[string]any) (string, error) {
+	return "", nil
+}
+func (f fakeTool) SystemPrompt() string { return "" }
+
+func TestRegistrySubset(t *testing.T) {
+	r := NewRegistry(
+		fakeTool{name: "a"},
+		fakeTool{name: "b"},
+		fakeTool{name: "c"},
+		fakeTool{name: "d"},
+	)
+
+	t.Run("allow all minus deny", func(t *testing.T) {
+		s := r.Subset([]string{"*"}, []string{"b"})
+		if s.Find("a") == nil || s.Find("c") == nil || s.Find("d") == nil {
+			t.Fatal("expected a,c,d to exist")
+		}
+		if s.Find("b") != nil {
+			t.Fatal("expected b to be denied")
+		}
+	})
+
+	t.Run("explicit allow", func(t *testing.T) {
+		s := r.Subset([]string{"a", "c"}, nil)
+		if s.Find("a") == nil || s.Find("c") == nil {
+			t.Fatal("expected a,c to exist")
+		}
+		if s.Find("b") != nil || s.Find("d") != nil {
+			t.Fatal("expected b,d to be excluded")
+		}
+	})
+
+	t.Run("allow with deny intersection", func(t *testing.T) {
+		s := r.Subset([]string{"a", "b", "c"}, []string{"b"})
+		if s.Find("a") == nil || s.Find("c") == nil {
+			t.Fatal("expected a,c to exist")
+		}
+		if s.Find("b") != nil {
+			t.Fatal("expected b to be denied")
+		}
+	})
+
+	t.Run("empty allow", func(t *testing.T) {
+		s := r.Subset(nil, nil)
+		if len(s.All()) != 0 {
+			t.Fatalf("expected empty registry, got %d", len(s.All()))
+		}
+	})
+}
+
+// --- Registry.ToAnthropicSDK cache_control tests ---
+
+func TestToAnthropicSDK_CacheControlOnLastTool(t *testing.T) {
+	r := NewRegistry(
+		fakeTool{name: "a"},
+		fakeTool{name: "b"},
+		fakeTool{name: "c"},
+	)
+	out := r.ToAnthropicSDK()
+	if len(out) != 3 {
+		t.Fatalf("expected 3 tools, got %d", len(out))
+	}
+	// Last tool should have cache_control.
+	last := out[len(out)-1]
+	if last.OfTool == nil {
+		t.Fatal("expected last tool to be OfTool variant")
+	}
+	if last.OfTool.CacheControl.Type != "ephemeral" {
+		t.Fatalf("expected cache_control type 'ephemeral', got %q", last.OfTool.CacheControl.Type)
+	}
+	// Earlier tools should not have cache_control.
+	first := out[0]
+	if first.OfTool != nil && first.OfTool.CacheControl.Type != "" {
+		t.Fatal("expected first tool to have no cache_control")
+	}
+}
+
+func TestToAnthropicSDK_EmptyRegistry(t *testing.T) {
+	r := NewRegistry()
+	out := r.ToAnthropicSDK()
+	if len(out) != 0 {
+		t.Fatalf("expected empty output, got %d", len(out))
+	}
+}
+
+// --- ConfirmBlockTool tests ---
+
+func TestConfirmBlockTool_Interface(t *testing.T) {
+	var _ Tool = ConfirmBlockTool{}
+}
+
+func TestConfirmBlockTool_Call(t *testing.T) {
+	ct := ConfirmBlockTool{}
+	result, err := ct.Call(context.Background(), map[string]any{
+		"summary": "已完成数据识别，数值为 4。确认后进入预处理步骤。",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "User confirmed") {
+		t.Fatalf("expected confirmation message, got: %s", result)
+	}
+	if !strings.Contains(result, "数据识别") {
+		t.Fatalf("expected summary to be echoed, got: %s", result)
+	}
+}
+
+func TestConfirmBlockTool_Call_EmptySummary(t *testing.T) {
+	ct := ConfirmBlockTool{}
+	result, err := ct.Call(context.Background(), map[string]any{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(result, "User confirmed") {
+		t.Fatalf("expected confirmation message, got: %s", result)
+	}
+}
+
+func TestConfirmBlockTool_Schema(t *testing.T) {
+	ct := ConfirmBlockTool{}
+	schema := ct.InputSchema()
+	if schema["type"] != "object" {
+		t.Fatalf("expected object schema")
+	}
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("expected properties map")
+	}
+	if _, ok := props["summary"]; !ok {
+		t.Fatal("expected 'summary' in properties")
+	}
+	required, ok := schema["required"].([]string)
+	if !ok || len(required) == 0 || required[0] != "summary" {
+		t.Fatal("expected 'summary' to be required")
+	}
+}

@@ -279,7 +279,7 @@ func (s *LLMSelector) selectWithLLM(ctx context.Context, query string, memories 
 	userMsg := message.Message{Role: message.RoleUser}
 	userMsg.AddText(userContent)
 
-	stream, err := s.client.StreamMessages(ctx, []message.Message{userMsg}, selectMemoriesSystemPrompt, nil, 0)
+	stream, err := s.client.StreamMessages(ctx, []message.Message{userMsg}, selectMemoriesSystemPrompt, nil, 0, 0)
 	if err != nil {
 		return nil
 	}

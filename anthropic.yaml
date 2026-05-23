@@ -39,6 +39,13 @@ enable_sm_compact: true
 enable_memory: true
 memory_dir: "./memory"
 
+# Agent and playbook directories
+agents_dir: "agents"
+playbook_dir: "playbooks"
+
+# Debug: print sub-agent streaming output to stderr
+debug: false
+
 # Session persistence (auto-save/load conversation history)
 # Leave empty to use default path: ~/.harness/projects/<cwd>/session.json
 session_file: "./session/a.json"

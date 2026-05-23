@@ -18,12 +18,14 @@ func TestSkillToolSystemPrompt(t *testing.T) {
 	reg.Register(&skill.Skill{
 		Name:        "review",
 		Description: "Review code changes",
+		WhenToUse:   "Use when the user asks for code review",
 		Content:     "Review content",
 	})
 	reg.Register(&skill.Skill{
 		Name:        "hidden",
 		Description: "Hidden skill",
 		Content:     "Hidden content",
+		// no WhenToUse → non-user-invocable, should not appear in listing
 	})
 
 	st := SkillTool{Registry: reg}
@@ -73,6 +75,7 @@ func TestSkillToolSystemPromptTruncatesLongDesc(t *testing.T) {
 	reg.Register(&skill.Skill{
 		Name:        "long",
 		Description: strings.Repeat("a", 300),
+		WhenToUse:   "Use for long descriptions",
 		Content:     "content",
 	})
 

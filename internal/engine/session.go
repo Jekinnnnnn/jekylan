@@ -68,8 +68,10 @@ func (e *Engine) SaveSession(path string) error {
 		}
 	}
 
+	// Deep copy messages to avoid data race during JSON serialization.
+	msgs := append([]message.Message(nil), e.messages...)
 	data := SessionData{
-		Messages:   e.messages,
+		Messages:   msgs,
 		TotalUsage: e.totalUsage,
 		SavedAt:    time.Now(),
 	}
@@ -109,6 +111,7 @@ func (e *Engine) LoadSession(path string) error {
 
 	e.messages = data.Messages
 	e.totalUsage = data.TotalUsage
+	e.textBuffer.Reset()
 	if e.memoryWorker != nil {
 		if sc := e.memoryWorker.SkillCollector(); sc != nil {
 			sc.Restore(data.SkillExecutions, data.ActiveWorkflow)

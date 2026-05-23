@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Jekinnnnnn/jekylan/internal/markdownutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -108,7 +109,7 @@ func LoadDir(basePath string) (*Registry, error) {
 
 // parseSkillFile parses a SKILL.md file into a Skill.
 func parseSkillFile(skillName, rawContent, skillDir string) (*Skill, error) {
-	frontmatter, content, err := splitFrontmatter(rawContent)
+	frontmatter, content, err := markdownutil.SplitFrontmatter(rawContent)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +134,7 @@ func parseSkillFile(skillName, rawContent, skillDir string) (*Skill, error) {
 
 	description := fm.Description
 	if description == "" {
-		description = extractDescriptionFromMarkdown(content)
+		description = markdownutil.ExtractDescriptionFromMarkdown(content)
 	}
 
 	return &Skill{
@@ -144,47 +145,6 @@ func parseSkillFile(skillName, rawContent, skillDir string) (*Skill, error) {
 		AllowedTools: fm.AllowedTools,
 		SkillRoot:    skillDir,
 	}, nil
-}
-
-// splitFrontmatter splits a markdown file into YAML frontmatter and body.
-// Supports the --- delimited format.
-func splitFrontmatter(content string) (frontmatter, body string, err error) {
-	trimmed := strings.TrimSpace(content)
-	if !strings.HasPrefix(trimmed, "---") {
-		return "", content, nil
-	}
-
-	parts := strings.SplitN(trimmed, "---", 3)
-	if len(parts) < 3 {
-		return "", content, nil
-	}
-
-	return strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2]), nil
-}
-
-// extractDescriptionFromMarkdown tries to extract a description from the first
-// paragraph of markdown content.
-func extractDescriptionFromMarkdown(content string) string {
-	lines := strings.Split(content, "\n")
-	var desc strings.Builder
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			if desc.Len() > 0 {
-				break
-			}
-			continue
-		}
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		desc.WriteString(trimmed)
-		desc.WriteString(" ")
-		if desc.Len() > 200 {
-			break
-		}
-	}
-	return strings.TrimSpace(desc.String())
 }
 
 // SubstituteArgs replaces $ARGUMENTS and positional $1, $2... placeholders
