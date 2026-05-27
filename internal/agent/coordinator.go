@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"github.com/Jekinnnnnn/jekylan/internal/message"
@@ -129,6 +130,10 @@ type Coordinator struct {
 
 	// debug prints sub-agent streaming output to stderr when true.
 	debug bool
+
+	// playbookRunning indicates whether a playbook is currently executing.
+	// When true, the agent tool should refuse to spawn new sub-agents.
+	playbookRunning atomic.Bool
 }
 
 // CoordinatorOption configures a Coordinator.
@@ -179,6 +184,17 @@ func (c *Coordinator) SetUsageSink(sink func(*message.Usage)) {
 	// Synchronous update is safe because the caller typically sets this
 	// before any agents are spawned.
 	c.usageSink = sink
+}
+
+// SetPlaybookRunning sets whether a playbook is currently executing.
+// When true, the agent tool will refuse to spawn new sub-agents.
+func (c *Coordinator) SetPlaybookRunning(running bool) {
+	c.playbookRunning.Store(running)
+}
+
+// IsPlaybookRunning reports whether a playbook is currently executing.
+func (c *Coordinator) IsPlaybookRunning() bool {
+	return c.playbookRunning.Load()
 }
 
 // Spawn starts a new background sub-agent and returns its ID.
@@ -725,4 +741,22 @@ You:
   agent({ description: "Fix auth null pointer", agent_type: "worker", prompt: "Fix the null pointer in src/auth/validate.ts:42. Add a null check before accessing user.id — if null, return 401 with 'Session expired'. Commit and report the hash." })
 
   Fix is in progress.`
+}
+
+// PassiveCoordinatorSystemPrompt returns the system prompt used when the
+// engine runs in playbook mode. The coordinator only observes and forwards
+// agent results; it does not create agents itself.
+func PassiveCoordinatorSystemPrompt() string {
+	return `You are an AI assistant observing a running playbook workflow.
+
+## Your Role
+
+A playbook is currently executing. Your job is to:
+- Answer user questions directly when possible
+- Summarize and forward agent completion notifications to the user
+- Do NOT create new agents — the playbook manages all workers autonomously
+
+## Agent Notifications
+
+You will receive system notifications when playbook agents complete. Summarize their results for the user concisely.`
 }

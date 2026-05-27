@@ -31,6 +31,12 @@ func (e *Executor) SetVar(name, value string) {
 // Execute runs the full execution plan.
 // It returns the final variable map (including all step outputs).
 func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan) (map[string]string, error) {
+	// Lock agent creation while playbook is running.
+	if s, ok := e.Spawner.(*agent.Spawner); ok {
+		s.Coord.SetPlaybookRunning(true)
+		defer s.Coord.SetPlaybookRunning(false)
+	}
+
 	if err := e.executePlan(ctx, plan); err != nil {
 		return nil, err
 	}

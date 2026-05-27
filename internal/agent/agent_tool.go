@@ -62,6 +62,10 @@ func (t AgentTool) InputSchema() map[string]any {
 }
 
 func (t AgentTool) Call(ctx context.Context, input map[string]any) (string, error) {
+	if t.Coordinator != nil && t.Coordinator.IsPlaybookRunning() {
+		return "", fmt.Errorf("agent tool is disabled while a playbook is running")
+	}
+
 	description, _ := input["description"].(string)
 	prompt, _ := input["prompt"].(string)
 	agentType, _ := input["agent_type"].(string)

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -84,6 +85,10 @@ type Engine struct {
 	// at message boundaries (usage, tool_use, error, result events)
 	// to reduce channel pressure on coordinator output.
 	textBuffer strings.Builder
+
+	// toolsMu protects the tools registry when it is swapped at runtime
+	// (e.g. during playbook execution).
+	toolsMu sync.RWMutex
 }
 
 // EngineOption configures an Engine via functional options.
@@ -140,10 +145,13 @@ func NewEngine(tools *tool.Registry, model string, maxTurns int, thinkingBudget 
 	}
 	if e.memoryDir != "" {
 		e.memoryWorker = memory.NewMemoryWorker(e.memoryDir, func(ctx context.Context, msgs []message.Message, systemPrompt string) <-chan query.Event {
+			e.toolsMu.RLock()
+			tools := e.tools
+			e.toolsMu.RUnlock()
 			return query.Query(ctx, query.Params{
 				Messages:         msgs,
 				SystemPrompt:     systemPrompt,
-				Tools:            e.tools,
+				Tools:            tools,
 				Client:           e.client,
 				DisableCompact:   true,
 				MaxTurns:         3,
@@ -157,6 +165,21 @@ func NewEngine(tools *tool.Registry, model string, maxTurns int, thinkingBudget 
 
 func (e *Engine) Messages() []message.Message {
 	return append([]message.Message(nil), e.messages...)
+}
+
+// GetTools returns the current tool registry.
+func (e *Engine) GetTools() *tool.Registry {
+	e.toolsMu.RLock()
+	defer e.toolsMu.RUnlock()
+	return e.tools
+}
+
+// SetTools swaps the tool registry at runtime.
+// Safe to call from any goroutine.
+func (e *Engine) SetTools(tools *tool.Registry) {
+	e.toolsMu.Lock()
+	defer e.toolsMu.Unlock()
+	e.tools = tools
 }
 
 // TotalUsage returns the cumulative token usage across all turns.
@@ -560,10 +583,14 @@ func (e *Engine) startQuery(ctx context.Context, prompt string) <-chan query.Eve
 	// from memory before the latest user message.
 	queryMsgs := e.injectRelevantMemories(queryCtx, prompt, append([]message.Message(nil), e.messages...))
 
+	e.toolsMu.RLock()
+	tools := e.tools
+	e.toolsMu.RUnlock()
+
 	return query.Query(queryCtx, query.Params{
 		Messages:         queryMsgs,
-		SystemPrompt:     BuildSystemPrompt(e.systemPrompt, e.model, e.tools, e.tokenBudget, e.memoryDir),
-		Tools:            e.tools,
+		SystemPrompt:     BuildSystemPrompt(e.systemPrompt, e.model, tools, e.tokenBudget, e.memoryDir),
+		Tools:            tools,
 		Model:            e.model,
 		MaxTurns:         e.maxTurns,
 		ThinkingBudget:   e.thinkingBudget,
