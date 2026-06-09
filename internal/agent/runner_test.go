@@ -317,8 +317,8 @@ func TestExtractLastResultText(t *testing.T) {
 
 func TestExtractUsage(t *testing.T) {
 	msgs := []message.Message{
-		{Role: message.RoleAssistant, Usage: &message.Usage{InputTokens: 10}},
-		{Role: message.RoleAssistant, Usage: &message.Usage{InputTokens: 20}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{Usage: &message.Usage{InputTokens: 10}}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{Usage: &message.Usage{InputTokens: 20}}},
 	}
 	if got := extractUsage(msgs); got == nil || got.InputTokens != 20 {
 		t.Fatalf("expected usage with 20 input tokens, got: %+v", got)

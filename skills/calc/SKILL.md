@@ -1,7 +1,8 @@
 ---
 name: calculate
-description: 当用户提到"开始算数"时触发。这是一个三步工作流：1)识别初始数据 2)初始数据预处理 3)生成格式化数据。每步执行后都会等待用户确认。
-enabled: false
+description: 当用户提到"开始算数"时触发。这是一个三步工作流，每步由独立 sub-agent 执行。
+when_to_use: 当用户提到"开始算数"、"开始计算"、"计算流程"时触发
+enabled: true
 ---
 
 ## 工作流程

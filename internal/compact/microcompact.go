@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/Jekinnnnnn/jekylan/internal/message"
+	"github.com/Jekinnnnnn/jekylan/internal/tokens"
 )
 
 const timeBasedMCClearedMessage = "[Old tool result content cleared]"
@@ -121,7 +122,7 @@ func applyTimeBasedMicrocompact(msgs []message.Message, keepRecent int) *Microco
 		for j, block := range newContent {
 			if tr, ok := block.(message.ToolResultBlock); ok {
 				if _, exists := keepSet[tr.ToolUseID]; !exists && tr.Content != timeBasedMCClearedMessage {
-					tokensSaved += RoughTokenCountForBlock(block)
+					tokensSaved += tokens.RoughTokenCountForBlock(block)
 					tr.Content = timeBasedMCClearedMessage
 					newContent[j] = tr
 					msgChanged = true

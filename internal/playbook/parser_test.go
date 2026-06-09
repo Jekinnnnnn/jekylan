@@ -71,7 +71,7 @@ func TestParsePlanParallel(t *testing.T) {
 
 func TestParsePlanWithConfirm(t *testing.T) {
 	content := `
-1. calc-step2
+1. (agent: calc-step2)
    - prompt: "process"
    - confirm: true
 `
@@ -81,6 +81,27 @@ func TestParsePlanWithConfirm(t *testing.T) {
 	}
 	if !plan.Phases[0].Steps[0].Confirm {
 		t.Error("expected confirm=true")
+	}
+	if plan.Phases[0].Steps[0].AgentType != "calc-step2" {
+		t.Errorf("agent type = %q, want calc-step2", plan.Phases[0].Steps[0].AgentType)
+	}
+}
+
+func TestParsePlanNoAgentType(t *testing.T) {
+	content := `
+1. Just a description without agent
+   - prompt: "process"
+`
+	plan, err := ParsePlan(content)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	step := plan.Phases[0].Steps[0]
+	if step.AgentType != "" {
+		t.Errorf("expected empty agent type, got %q", step.AgentType)
+	}
+	if step.Description != "Just a description without agent" {
+		t.Errorf("description = %q, want \"Just a description without agent\"", step.Description)
 	}
 }
 

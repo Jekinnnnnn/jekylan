@@ -108,13 +108,12 @@ func (t AgentTool) Call(ctx context.Context, input map[string]any) (string, erro
 	}
 
 	if t.Coordinator != nil {
-		id := t.Coordinator.Spawn(context.Background(), def, prompt, runnerOpts)
+		id := t.Coordinator.Spawn(ctx, def, prompt, runnerOpts)
 		return fmt.Sprintf("Agent '%s' started in background (id: %s).", description, id), nil
 	}
 	// Fallback if no coordinator is wired.
 	go func() {
-		bgCtx := context.Background()
-		for range NewRunner(runnerOpts).Run(bgCtx, prompt) {
+		for range NewRunner(runnerOpts).Run(ctx, prompt) {
 			// Events discarded — no lifecycle tracking available.
 		}
 	}()

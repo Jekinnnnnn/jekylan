@@ -50,6 +50,42 @@ func TestSessionDataRoundTripWithSkillState(t *testing.T) {
 	}
 }
 
+func TestSessionDataRoundTrip_WithCacheBreakpointAndVersion(t *testing.T) {
+	original := SessionData{
+		Version: 1,
+		Messages: []message.Message{
+			{Role: message.RoleUser, Timestamp: time.Now(), TurnMetadata: message.TurnMetadata{CacheBreakpoint: true}},
+			{Role: message.RoleAssistant, Timestamp: time.Now()},
+		},
+		SavedAt: time.Now().UTC().Truncate(time.Second),
+	}
+	original.Messages[0].AddText("user text")
+	original.Messages[1].AddText("assistant text")
+
+	b, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var loaded SessionData
+	if err := json.Unmarshal(b, &loaded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if loaded.Version != original.Version {
+		t.Errorf("Version: got %d want %d", loaded.Version, original.Version)
+	}
+	if len(loaded.Messages) != len(original.Messages) {
+		t.Fatalf("Messages length: got %d want %d", len(loaded.Messages), len(original.Messages))
+	}
+	if !loaded.Messages[0].CacheBreakpoint {
+		t.Error("CacheBreakpoint lost on first message")
+	}
+	if loaded.Messages[0].TextContent() != "user text" {
+		t.Errorf("Message content lost: got %q", loaded.Messages[0].TextContent())
+	}
+}
+
 func TestSessionDataBackwardCompat(t *testing.T) {
 	// Legacy session.json without skill_executions / active_workflow.
 	legacy := []byte(`{

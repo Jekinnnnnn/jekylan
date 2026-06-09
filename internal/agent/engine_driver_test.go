@@ -65,3 +65,24 @@ func TestEngineDriver_StopIdempotent(t *testing.T) {
 	// Second stop should be safe.
 	driver.Stop()
 }
+
+// TestEngineDriver_RejectsConcurrentStart verifies that a second Start while
+// an engine is running is ignored, and a Start after the first exits works.
+func TestEngineDriver_RejectsConcurrentStart(t *testing.T) {
+	eng1 := engine.NewEngine(nil, "test-model", 10, 0, "", nil, true)
+	eng2 := engine.NewEngine(nil, "test-model", 10, 0, "", nil, true)
+	driver := NewEngineDriver()
+	defer driver.Stop()
+
+	driver.Start(context.Background(), eng1, "")
+
+	// Second Start while first is running should be ignored (no panic).
+	driver.Start(context.Background(), eng2, "")
+
+	close(driver.Input())
+	select {
+	case <-driver.Done():
+	case <-time.After(time.Second):
+		t.Fatal("expected driver to exit after input close")
+	}
+}

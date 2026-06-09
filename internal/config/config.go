@@ -37,6 +37,7 @@ type Config struct {
 	APITargetInputTokens          int     `yaml:"api_target_input_tokens,omitempty"`
 	AutoCompactWindow             int     `yaml:"auto_compact_window,omitempty"`
 	AutoCompactPctOverride        float64 `yaml:"auto_compact_pct_override,omitempty"`
+	AutoCompactThresholdOverride  int     `yaml:"auto_compact_threshold_override,omitempty"`
 	BlockingLimitOverride         int     `yaml:"blocking_limit_override,omitempty"`
 	DisableAutoCompact            bool    `yaml:"disable_auto_compact,omitempty"`
 	SkillsDir                     string  `yaml:"skills_dir,omitempty"`

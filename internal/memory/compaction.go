@@ -108,6 +108,7 @@ func formatToolInput(block message.ToolUseBlock) string {
 		if cmd, ok := block.Input["command"].(string); ok {
 			return cmd
 		}
+		return ""
 	case "skill":
 		var parts []string
 		if skill, ok := block.Input["skill"].(string); ok && skill != "" {
@@ -121,7 +122,6 @@ func formatToolInput(block message.ToolUseBlock) string {
 		inputJSON, _ := json.Marshal(block.Input)
 		return string(inputJSON)
 	}
-	return ""
 }
 
 // extractSkillName finds the first skill tool_use to determine the skill name.
@@ -140,17 +140,18 @@ func extractSkillName(msgs []message.Message) string {
 	return "unknown"
 }
 
-// extractDate returns the date from the first message timestamp, or today.
+// extractDate returns the date from the first message timestamp, or empty string.
 func extractDate(msgs []message.Message) string {
 	for _, m := range msgs {
 		if !m.Timestamp.IsZero() {
 			return m.Timestamp.Format("2006-01-02")
 		}
 	}
-	return time.Now().Format("2006-01-02")
+	return ""
 }
 
-// extractTimeRange returns start and end times from message timestamps.
+// extractTimeRange returns start and end times from message timestamps,
+// or empty strings when no timestamps are present.
 func extractTimeRange(msgs []message.Message) (string, string) {
 	var first, last time.Time
 	for _, m := range msgs {
@@ -162,8 +163,7 @@ func extractTimeRange(msgs []message.Message) (string, string) {
 		}
 	}
 	if first.IsZero() {
-		now := time.Now().Format("15:04")
-		return now, now
+		return "", ""
 	}
 	return first.Format("15:04"), last.Format("15:04")
 }
@@ -207,6 +207,9 @@ func compactMessage(m message.Message) *message.Message {
 			// Skip thinking blocks.
 		case message.RedactedThinkingBlock:
 			// Skip redacted thinking blocks.
+		default:
+			// Preserve unknown block types rather than silently dropping them.
+			out.Content = append(out.Content, block)
 		}
 	}
 

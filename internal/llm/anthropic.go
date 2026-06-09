@@ -13,6 +13,52 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/option"
 )
 
+func toAnthropicMessage(m message.Message) sdk.MessageParam {
+	blocks := make([]sdk.ContentBlockParamUnion, len(m.Content))
+	for i, c := range m.Content {
+		blocks[i] = toAnthropicBlock(c)
+	}
+	if m.CacheBreakpoint {
+		for i := len(blocks) - 1; i >= 0; i-- {
+			if blocks[i].OfText != nil {
+				blocks[i].OfText.CacheControl = sdk.NewCacheControlEphemeralParam()
+				break
+			}
+		}
+	}
+	switch m.Role {
+	case message.RoleAssistant:
+		return sdk.NewAssistantMessage(blocks...)
+	case message.RoleSystem:
+		return sdk.NewUserMessage(blocks...)
+	default:
+		return sdk.NewUserMessage(blocks...)
+	}
+}
+
+func toAnthropicBlock(b message.ContentBlock) sdk.ContentBlockParamUnion {
+	switch block := b.(type) {
+	case message.TextBlock:
+		return sdk.NewTextBlock(block.Text)
+	case message.ToolUseBlock:
+		return sdk.ContentBlockParamUnion{
+			OfToolUse: &sdk.ToolUseBlockParam{
+				ID:    block.ID,
+				Name:  block.Name,
+				Input: block.Input,
+			},
+		}
+	case message.ToolResultBlock:
+		return sdk.NewToolResultBlock(block.ToolUseID, block.Content, block.IsError)
+	case message.ThinkingBlock:
+		return sdk.NewThinkingBlock(block.Signature, block.Thinking)
+	case message.RedactedThinkingBlock:
+		return sdk.NewRedactedThinkingBlock(block.Data)
+	default:
+		return sdk.ContentBlockParamUnion{}
+	}
+}
+
 // AnthropicClient wraps the Anthropic SDK for streaming message generation.
 type AnthropicClient struct {
 	inner             sdk.Client
@@ -69,10 +115,13 @@ func (c *AnthropicClient) StreamMessages(ctx context.Context, msgs []message.Mes
 	}
 
 	for i, m := range msgs {
+		if m.Role == message.RoleSystem {
+			continue
+		}
 		if len(m.Content) == 0 {
 			return nil, fmt.Errorf("message %d (role=%s) has empty content", i, m.Role)
 		}
-		params.Messages = append(params.Messages, m.ToAnthropicMessage())
+		params.Messages = append(params.Messages, toAnthropicMessage(m))
 	}
 
 	if systemPrompt != "" {
@@ -133,7 +182,7 @@ func (c *AnthropicClient) CountTokens(ctx context.Context, msgs []message.Messag
 		Model: sdk.Model(c.model),
 	}
 	for _, m := range msgs {
-		params.Messages = append(params.Messages, m.ToAnthropicMessage())
+		params.Messages = append(params.Messages, toAnthropicMessage(m))
 	}
 	resp, err := c.inner.Messages.CountTokens(ctx, params)
 	if err != nil {

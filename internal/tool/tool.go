@@ -84,6 +84,17 @@ func (r *Registry) ToOpenAISDK() []oai.ChatCompletionToolParam {
 	return out
 }
 
+// IsRisky returns true for tools that may modify state or execute arbitrary
+// commands and should require user confirmation.
+func (r *Registry) IsRisky(name string) bool {
+	switch name {
+	case "bash", "file_write", "file_edit", "confirm":
+		return true
+	default:
+		return false
+	}
+}
+
 // Subset returns a new Registry containing only tools whose names are in
 // allow, minus any whose names are in deny. allow=["*"] means all tools
 // except those in deny.

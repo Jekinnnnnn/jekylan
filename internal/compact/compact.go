@@ -8,6 +8,7 @@ import (
 
 	"github.com/Jekinnnnnn/jekylan/internal/llm"
 	"github.com/Jekinnnnnn/jekylan/internal/message"
+	"github.com/Jekinnnnnn/jekylan/internal/tokens"
 )
 
 // Result is the outcome of a compaction operation.
@@ -23,11 +24,6 @@ const compactSystemPrompt = "You are a helpful AI assistant tasked with summariz
 func CompactConversation(ctx context.Context, client llm.Client, model string, msgs []message.Message) (*Result, error) {
 	if len(msgs) == 0 {
 		return nil, fmt.Errorf("not enough messages to compact")
-	}
-
-	// Try session memory compaction first (no custom instructions support).
-	if sessionResult := TrySessionMemoryCompaction(msgs, 0); sessionResult != nil {
-		return sessionResult, nil
 	}
 
 	fmt.Fprintf(os.Stderr, "[jekylan-debug] legacy compact: generating summary for %d messages\n", len(msgs))
@@ -49,7 +45,7 @@ func CompactConversation(ctx context.Context, client llm.Client, model string, m
 	result := &Result{
 		Messages: []message.Message{boundary, summaryMsg},
 	}
-	result.PostCompactTokens = EstimateMessageTokens(result.Messages)
+	result.PostCompactTokens = tokens.EstimateMessageTokens(result.Messages)
 	return result, nil
 }
 
@@ -59,7 +55,7 @@ func streamCompactSummary(ctx context.Context, client llm.Client, model string, 
 	summaryReq.AddText(compactPrompt)
 	summaryMsgs := append(append([]message.Message(nil), msgs...), summaryReq)
 
-	stream, err := client.StreamMessages(ctx, summaryMsgs, compactSystemPrompt, nil, 0, 0)
+	stream, err := client.StreamMessages(ctx, summaryMsgs, compactSystemPrompt, nil, 4096, 0)
 	if err != nil {
 		return "", err
 	}

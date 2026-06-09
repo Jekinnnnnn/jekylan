@@ -66,6 +66,7 @@ func deepCopyBlock(block message.ContentBlock) message.ContentBlock {
 	case message.RedactedThinkingBlock:
 		return message.RedactedThinkingBlock{Data: b.Data}
 	default:
+		// Unknown block type — cannot safely deep-copy without knowing its fields.
 		return block
 	}
 }

@@ -27,7 +27,7 @@ func TestAnthropicMessageParamSerialization(t *testing.T) {
 	}
 
 	for _, m := range msgs {
-		params.Messages = append(params.Messages, m.ToAnthropicMessage())
+		params.Messages = append(params.Messages, toAnthropicMessage(m))
 	}
 
 	b, err := json.MarshalIndent(params, "", "  ")

@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Jekinnnnnn/jekylan/internal/engine"
-	"github.com/Jekinnnnnn/jekylan/internal/query"
 )
 
 // engineDriverEvent is a marker interface for events handled by the driver's
@@ -26,8 +26,7 @@ type stopEngineReq struct {
 }
 
 // EngineDriver runs an engine.Engine in its own goroutine and bridges
-// input/output channels. It is the extracted REPL bridge formerly inside
-// Coordinator.
+// input/output channels.
 type EngineDriver struct {
 	inputCh  chan string
 	outputCh chan string
@@ -36,11 +35,8 @@ type EngineDriver struct {
 
 	events chan engineDriverEvent
 
-	// state — owned by event-loop goroutine
-	engine          *engine.Engine
-	engineOutput    <-chan string
-	engineDone      <-chan struct{}
-	engineCtxCancel context.CancelFunc
+	// engineRunning prevents multiple concurrent engine loops.
+	engineRunning atomic.Bool
 }
 
 // NewEngineDriver builds an EngineDriver and starts the background event loop.
@@ -93,54 +89,29 @@ func (d *EngineDriver) Stop() {
 }
 
 func (d *EngineDriver) loop() {
+	var currentEng *engine.Engine
+	var sessionPath string
+
 	for {
 		select {
 		case evt := <-d.events:
 			switch e := evt.(type) {
 			case startEngineReq:
-				out := make(chan string, 64)
-				done := make(chan struct{})
-				d.engineOutput = out
-				d.engineDone = done
-				engineCtx, engineCtxCancel := context.WithCancel(e.ctx)
-				d.engineCtxCancel = engineCtxCancel
-
-				go func() {
-					defer close(done)
-					readInput := func() (string, error) {
-						line, ok := <-d.inputCh
-						if !ok {
-							return "", io.EOF
-						}
-						return line, nil
-					}
-					d.engine = e.eng
-					if err := e.eng.Run(engine.RunOptions{
-						ReadInput: readInput,
-						OnOutput:  func(s string) { out <- s },
-						OnResult: func(r query.Result) {
-							if r.Success {
-								select {
-								case out <- fmt.Sprintf("\n[turn complete | %s]\n", e.eng.TotalUsage()):
-								default:
-								}
-							}
-						},
-						Context:     engineCtx,
-						SessionPath: e.sessionPath,
-					}); err != nil {
-						select {
-						case out <- fmt.Sprintf("[engine error] %v\n", err):
-						default:
-						}
-					}
-				}()
+				if d.engineRunning.Load() {
+					e.resp <- struct{}{}
+					continue
+				}
+				currentEng = e.eng
+				sessionPath = e.sessionPath
+				d.engineRunning.Store(true)
+				go d.runEngineLoop(e.ctx, currentEng, sessionPath)
 				e.resp <- struct{}{}
 
 			case stopEngineReq:
-				if d.engineCtxCancel != nil {
-					d.engineCtxCancel()
+				if currentEng != nil {
+					currentEng.Stop()
 				}
+				d.engineRunning.Store(false)
 				d.closeOnce.Do(func() {
 					close(d.doneCh)
 					close(d.outputCh)
@@ -148,23 +119,69 @@ func (d *EngineDriver) loop() {
 				e.resp <- struct{}{}
 				return
 			}
-
-		case text := <-d.engineOutput:
-			if text != "" {
-				select {
-				case d.outputCh <- text:
-				default:
-				}
-			}
-		case <-d.engineDone:
-			if d.engineCtxCancel != nil {
-				d.engineCtxCancel()
-			}
-			d.closeOnce.Do(func() {
-				close(d.doneCh)
-				close(d.outputCh)
-			})
-			return
 		}
 	}
+}
+
+func (d *EngineDriver) runEngineLoop(ctx context.Context, eng *engine.Engine, sessionPath string) {
+	defer d.engineRunning.Store(false)
+
+	readInput := func() (string, error) {
+		line, ok := <-d.inputCh
+		if !ok {
+			return "", io.EOF
+		}
+		return line, nil
+	}
+
+	onOutput := func(s string) {
+		select {
+		case d.outputCh <- s:
+		default:
+		}
+	}
+
+	for {
+		line, err := readInput()
+		if err != nil {
+			break
+		}
+		if line == "" {
+			continue
+		}
+		if line == "/quit" || line == "/exit" {
+			if sessionPath != "" {
+				_ = eng.SaveSession(sessionPath)
+			}
+			break
+		}
+		if line == "/reset" {
+			eng.Reset()
+			onOutput("Conversation reset.\n")
+			continue
+		}
+		if line == "/stop" {
+			eng.Interrupt()
+			onOutput("Interrupted.\n")
+			continue
+		}
+
+		for evt := range eng.Turn(ctx, line) {
+			if text := engine.FormatEvent(evt); text != "" {
+				onOutput(text)
+			}
+			if evt.Type == engine.EventTurnResult && evt.Result.Success {
+				onOutput(fmt.Sprintf("\n[turn complete | %s]\n", eng.TotalUsage()))
+			}
+		}
+
+		if sessionPath != "" {
+			_ = eng.SaveSession(sessionPath)
+		}
+	}
+
+	d.closeOnce.Do(func() {
+		close(d.doneCh)
+		close(d.outputCh)
+	})
 }

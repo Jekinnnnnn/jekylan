@@ -5,9 +5,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/Jekinnnnnn/jekylan/internal/agent"
+	"github.com/Jekinnnnnn/jekylan/internal/cli"
 	"github.com/Jekinnnnnn/jekylan/internal/compact"
 	"github.com/Jekinnnnnn/jekylan/internal/config"
 	"github.com/Jekinnnnnn/jekylan/internal/engine"
@@ -15,7 +18,6 @@ import (
 	"github.com/Jekinnnnnn/jekylan/internal/memory"
 	"github.com/Jekinnnnnn/jekylan/internal/message"
 	"github.com/Jekinnnnnn/jekylan/internal/playbook"
-	"github.com/Jekinnnnnn/jekylan/internal/query"
 	"github.com/Jekinnnnnn/jekylan/internal/skill"
 	"github.com/Jekinnnnnn/jekylan/internal/tool"
 	"github.com/chzyer/readline"
@@ -49,6 +51,7 @@ func main() {
 		APITargetInputTokens:          cfg.APITargetInputTokens,
 		AutoCompactWindow:             cfg.AutoCompactWindow,
 		AutoCompactPctOverride:        cfg.AutoCompactPctOverride,
+		AutoCompactThresholdOverride:  cfg.AutoCompactThresholdOverride,
 		BlockingLimitOverride:         cfg.BlockingLimitOverride,
 		DisableCompact:                cfg.DisableCompact,
 		DisableAutoCompact:            cfg.DisableAutoCompact,
@@ -189,6 +192,7 @@ func main() {
 	}
 
 	eng := engine.NewEngine(registry, cfg.Model, cfg.MaxTurns, cfg.ThinkingBudget, cfg.SystemPrompt, client, cfg.DisableCompact, opts...)
+	defer eng.Stop()
 
 	// Wire the Agent tool to the engine's transcript and tool registry.
 	// Sub-agents always get the full registry so they can use bash/file tools.
@@ -230,38 +234,10 @@ func main() {
 }
 
 func runSingleShot(ctx context.Context, eng *engine.Engine, sessionPath, prompt string) {
-	if sessionPath != "" {
-		if err := eng.LoadSession(sessionPath); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to load session: %v\n", err)
-		} else if len(eng.Messages()) > 0 {
-			fmt.Fprintf(os.Stderr, "Loaded %d messages from session\n", len(eng.Messages()))
-		}
-	}
-
-	fmt.Println("=== Assistant ===")
-	var result query.Result
-
-	err := eng.Run(engine.RunOptions{
-		OnOutput:    func(s string) { fmt.Print(s) },
-		OnResult:    func(r query.Result) { result = r },
-		Context:     ctx,
-		SessionPath: sessionPath,
-		Prompt:      prompt,
-	})
-
-	fmt.Println("\n=== Result ===")
-	if result.Success {
-		fmt.Printf("Success | turns=%d | stop_reason=%s | %s\n", result.NumTurns, result.StopReason, eng.TotalUsage())
-	} else {
-		fmt.Printf("Error: %s | turns=%d | %s\n", result.Error, result.NumTurns, eng.TotalUsage())
-		os.Exit(1)
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Engine error: %v\n", err)
-	}
+	cli.RunSingleShot(ctx, eng, sessionPath, prompt)
 }
 
-func runREPL(ctx context.Context, coord *agent.Coordinator, eng *engine.Engine, sessionPath string, playbookReg *playbook.Registry, spawner agent.AgentSpawner) {
+func runREPL(ctx context.Context, coord *agent.Coordinator, eng *engine.Engine, sessionPath string, playbookReg *playbook.Registry, spawner *agent.Spawner) {
 	recoverSession(eng, sessionPath)
 
 	rl, err := readline.New("> ")
@@ -280,6 +256,9 @@ func runREPL(ctx context.Context, coord *agent.Coordinator, eng *engine.Engine, 
 		for {
 			line, err := rl.Readline()
 			if err != nil {
+				if err == readline.ErrInterrupt {
+					continue
+				}
 				return line, err
 			}
 			if after, ok := strings.CutPrefix(line, "/playbook "); ok {
@@ -306,7 +285,7 @@ func runREPL(ctx context.Context, coord *agent.Coordinator, eng *engine.Engine, 
 						eng.SetTools(originalTools)
 					}()
 
-					executor := playbook.NewExecutor(spawner)
+					executor := playbook.NewExecutor(spawner, playbook.WithLifecycleHook(spawner.SetPlaybookRunning))
 					vars, err := executor.Execute(ctx, plan)
 					if err != nil {
 						fmt.Printf("Playbook failed: %v\n", err)
@@ -364,18 +343,9 @@ func runREPL(ctx context.Context, coord *agent.Coordinator, eng *engine.Engine, 
 		}
 	}
 
-	// Start the engine loop; it blocks until /quit or signal.
-	eng.Run(engine.RunOptions{
-		ReadInput:  readInput,
-		OnOutput:   func(s string) { fmt.Print(s) },
-		OnQueryEnd: rl.Refresh,
-		OnResult: func(r query.Result) {
-			if r.Success {
-				fmt.Printf("\n[turn complete | %s]\n", eng.TotalUsage())
-			}
-		},
-		Context:     ctx,
-		SessionPath: sessionPath,
+	cli.RunREPL(ctx, eng, sessionPath, readInput, func(s string) {
+		fmt.Print(s)
+		rl.Refresh()
 	})
 
 	fmt.Println("Goodbye.")
@@ -386,7 +356,7 @@ func runREPL(ctx context.Context, coord *agent.Coordinator, eng *engine.Engine, 
 // readline input into driver.Input() and prints whatever arrives on
 // driver.Output(). Agent lifecycle notices from coord.Notices() are also
 // printed to stdout and forwarded to the engine.
-func runCoordinatorREPL(ctx context.Context, driver *agent.EngineDriver, coord *agent.Coordinator, eng *engine.Engine, sessionPath string, playbookReg *playbook.Registry, spawner agent.AgentSpawner) {
+func runCoordinatorREPL(ctx context.Context, driver *agent.EngineDriver, coord *agent.Coordinator, eng *engine.Engine, sessionPath string, playbookReg *playbook.Registry, spawner *agent.Spawner) {
 	recoverSession(eng, sessionPath)
 
 	rl, err := readline.New("> ")
@@ -401,6 +371,15 @@ func runCoordinatorREPL(ctx context.Context, driver *agent.EngineDriver, coord *
 	fmt.Println()
 
 	driver.Start(ctx, eng, sessionPath)
+
+	// Handle Ctrl+C / SIGTERM: interrupt the engine without exiting.
+	sigNotify := make(chan os.Signal, 1)
+	signal.Notify(sigNotify, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		for range sigNotify {
+			eng.Interrupt()
+		}
+	}()
 
 	// Drain engine output to stdout.
 	go func() {
@@ -423,6 +402,9 @@ func runCoordinatorREPL(ctx context.Context, driver *agent.EngineDriver, coord *
 	for {
 		line, err := rl.Readline()
 		if err != nil {
+			if err == readline.ErrInterrupt {
+				continue
+			}
 			break
 		}
 		if after, ok := strings.CutPrefix(line, "/playbook "); ok {
@@ -451,7 +433,7 @@ func runCoordinatorREPL(ctx context.Context, driver *agent.EngineDriver, coord *
 					eng.SetTools(originalTools)
 				}()
 
-				executor := playbook.NewExecutor(spawner)
+				executor := playbook.NewExecutor(spawner, playbook.WithLifecycleHook(spawner.SetPlaybookRunning))
 				vars, err := executor.Execute(ctx, plan)
 				if err != nil {
 					fmt.Printf("Playbook failed: %v\n", err)
@@ -518,7 +500,7 @@ func runCoordinatorREPL(ctx context.Context, driver *agent.EngineDriver, coord *
 // runCoordinatorREPL but the engine starts with a passive system prompt
 // and no agent tool, so the coordinator cannot spawn agents on its own.
 // Playbook steps still spawn agents via the Spawner directly.
-func runPlaybookREPL(ctx context.Context, driver *agent.EngineDriver, coord *agent.Coordinator, eng *engine.Engine, sessionPath string, playbookReg *playbook.Registry, spawner agent.AgentSpawner) {
+func runPlaybookREPL(ctx context.Context, driver *agent.EngineDriver, coord *agent.Coordinator, eng *engine.Engine, sessionPath string, playbookReg *playbook.Registry, spawner *agent.Spawner) {
 	recoverSession(eng, sessionPath)
 
 	rl, err := readline.New("> ")
@@ -534,6 +516,15 @@ func runPlaybookREPL(ctx context.Context, driver *agent.EngineDriver, coord *age
 	fmt.Println()
 
 	driver.Start(ctx, eng, sessionPath)
+
+	// Handle Ctrl+C / SIGTERM: interrupt the engine without exiting.
+	sigNotify := make(chan os.Signal, 1)
+	signal.Notify(sigNotify, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		for range sigNotify {
+			eng.Interrupt()
+		}
+	}()
 
 	// Drain engine output to stdout.
 	go func() {
@@ -555,6 +546,9 @@ func runPlaybookREPL(ctx context.Context, driver *agent.EngineDriver, coord *age
 	for {
 		line, err := rl.Readline()
 		if err != nil {
+			if err == readline.ErrInterrupt {
+				continue
+			}
 			break
 		}
 		if after, ok := strings.CutPrefix(line, "/playbook "); ok {
@@ -575,7 +569,7 @@ func runPlaybookREPL(ctx context.Context, driver *agent.EngineDriver, coord *age
 			}
 			// Playbook mode already has no agent tool, so no need to filter here.
 			go func() {
-				executor := playbook.NewExecutor(spawner)
+				executor := playbook.NewExecutor(spawner, playbook.WithLifecycleHook(spawner.SetPlaybookRunning))
 				vars, err := executor.Execute(ctx, plan)
 				if err != nil {
 					fmt.Printf("Playbook failed: %v\n", err)

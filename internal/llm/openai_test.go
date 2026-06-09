@@ -34,7 +34,7 @@ func TestOpenAITwoTurnWithTool(t *testing.T) {
 	params.Messages = append(params.Messages, oai.SystemMessage("You are a helpful assistant."))
 
 	for _, m := range msgs {
-		params.Messages = append(params.Messages, m.ToOpenAIMessages()...)
+		params.Messages = append(params.Messages, toOpenAIMessages(m)...)
 	}
 
 	b, _ := json.MarshalIndent(params, "", "  ")

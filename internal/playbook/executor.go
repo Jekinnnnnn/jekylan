@@ -11,16 +11,32 @@ import (
 
 // Executor drives the execution of an ExecutionPlan.
 type Executor struct {
-	Spawner agent.AgentSpawner
-	vars    map[string]string
+	Spawner       agent.AgentSpawner
+	lifecycleHook func(running bool)
+	vars          map[string]string
+}
+
+// Option configures an Executor.
+type Option func(*Executor)
+
+// WithLifecycleHook registers a callback invoked when playbook execution
+// starts (true) and ends (false).
+func WithLifecycleHook(hook func(running bool)) Option {
+	return func(e *Executor) {
+		e.lifecycleHook = hook
+	}
 }
 
 // NewExecutor creates a new playbook executor.
-func NewExecutor(spawner agent.AgentSpawner) *Executor {
-	return &Executor{
+func NewExecutor(spawner agent.AgentSpawner, opts ...Option) *Executor {
+	e := &Executor{
 		Spawner: spawner,
 		vars:    make(map[string]string),
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // SetVar sets an initial variable available to all steps.
@@ -32,9 +48,9 @@ func (e *Executor) SetVar(name, value string) {
 // It returns the final variable map (including all step outputs).
 func (e *Executor) Execute(ctx context.Context, plan *ExecutionPlan) (map[string]string, error) {
 	// Lock agent creation while playbook is running.
-	if s, ok := e.Spawner.(*agent.Spawner); ok {
-		s.Coord.SetPlaybookRunning(true)
-		defer s.Coord.SetPlaybookRunning(false)
+	if e.lifecycleHook != nil {
+		e.lifecycleHook(true)
+		defer e.lifecycleHook(false)
 	}
 
 	if err := e.executePlan(ctx, plan); err != nil {
@@ -66,13 +82,15 @@ func (e *Executor) executePhase(ctx context.Context, phaseIdx int, phase Phase) 
 		}
 		return nil
 	}
+	return e.executeParallelPhase(ctx, phaseIdx, phase)
+}
 
-	// Parallel phase: spawn all agents first, then wait for all.
+func (e *Executor) executeParallelPhase(ctx context.Context, phaseIdx int, phase Phase) error {
+	// Spawn all agents first, then wait for all.
 	ids := make([]string, len(phase.Steps))
 	for i, step := range phase.Steps {
 		id, err := e.spawnStep(ctx, step)
 		if err != nil {
-			// Kill already spawned agents.
 			for j := 0; j < i; j++ {
 				e.Spawner.Kill(ids[j])
 			}
@@ -90,18 +108,23 @@ func (e *Executor) executePhase(ctx context.Context, phaseIdx int, phase Phase) 
 			}
 			continue
 		}
+
+		if firstErr != nil && ra.Status != agent.StatusCompleted {
+			// An earlier step already failed; this agent was either killed by us
+			// or failed independently. We only report the first error.
+			continue
+		}
+
 		if ra.Status != agent.StatusCompleted {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("phase %d step %d (%s): status=%s error=%s", phaseIdx, i, ra.ID, ra.Status, ra.Error)
-			}
-			// Kill remaining running agents.
+			firstErr = fmt.Errorf("phase %d step %d (%s): status=%s error=%s", phaseIdx, i, ra.ID, ra.Status, ra.Error)
 			for j := i + 1; j < len(ids); j++ {
 				e.Spawner.Kill(ids[j])
 			}
 			continue
 		}
+
 		step := phase.Steps[i]
-		if step.OutputVar != "" && ra.Result != "" {
+		if step.OutputVar != "" {
 			e.vars[step.OutputVar] = ra.Result
 		}
 		if step.SubPlan != nil {
@@ -124,7 +147,7 @@ func (e *Executor) executeStep(ctx context.Context, phaseIdx, stepIdx int, step 
 	if ra.Status != agent.StatusCompleted {
 		return fmt.Errorf("status=%s error=%s", ra.Status, ra.Error)
 	}
-	if step.OutputVar != "" && ra.Result != "" {
+	if step.OutputVar != "" {
 		e.vars[step.OutputVar] = ra.Result
 	}
 	if step.SubPlan != nil {

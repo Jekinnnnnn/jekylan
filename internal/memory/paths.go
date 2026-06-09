@@ -10,7 +10,8 @@ import (
 // MemoryBaseDir returns the base directory for persistent memory storage.
 // Resolution order:
 //  1. JEKYLAN_MEMORY_DIR env var (explicit override)
-//  2. ~/.harness (default config home)
+//  2. ~/.harness (legacy, used if it exists for backward compatibility)
+//  3. ~/.jekylan (default config home)
 func MemoryBaseDir() string {
 	if dir := os.Getenv("JEKYLAN_MEMORY_DIR"); dir != "" {
 		return dir
@@ -19,7 +20,11 @@ func MemoryBaseDir() string {
 	if err != nil {
 		return "."
 	}
-	return filepath.Join(home, ".harness")
+	legacy := filepath.Join(home, ".harness")
+	if _, err := os.Stat(legacy); err == nil {
+		return legacy
+	}
+	return filepath.Join(home, ".jekylan")
 }
 
 // GetMemoryDir returns the auto-memory directory path for the current project.
@@ -27,7 +32,7 @@ func MemoryBaseDir() string {
 // Otherwise resolves to <memoryBase>/projects/<sanitized-cwd>/memory/.
 func GetMemoryDir(customDir string) string {
 	if customDir != "" {
-		return ensureTrailingSep(customDir)
+		return customDir
 	}
 
 	cwd, err := os.Getwd()
@@ -36,7 +41,7 @@ func GetMemoryDir(customDir string) string {
 	}
 
 	projectsDir := filepath.Join(MemoryBaseDir(), "projects")
-	return ensureTrailingSep(filepath.Join(projectsDir, sanitizePath(cwd), "memory"))
+	return filepath.Join(projectsDir, sanitizePath(cwd), "memory")
 }
 
 // IsMemoryPath checks if an absolute path is within the given memory directory.
@@ -79,14 +84,6 @@ func GetSessionPath(memoryDir string) string {
 		return "session.json"
 	}
 	return filepath.Join(memoryDir, "session.json")
-}
-
-// ensureTrailingSep ensures the path ends with the OS-specific separator.
-func ensureTrailingSep(p string) string {
-	if !strings.HasSuffix(p, string(filepath.Separator)) {
-		return p + string(filepath.Separator)
-	}
-	return p
 }
 
 // sanitizePath produces a filesystem-safe directory name from an arbitrary path.

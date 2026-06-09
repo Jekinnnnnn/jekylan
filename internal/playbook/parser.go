@@ -94,11 +94,11 @@ func parseStepNodes(lines []string, start, baseIndent int) ([]stepNode, int, err
 	i := start
 	for i < len(lines) {
 		line := lines[i]
-		if strings.TrimRight(line, " \t") == "" {
+		if isEmptyLine(line) {
 			i++
 			continue
 		}
-		indent := len(line) - len(strings.TrimLeft(line, " \t"))
+		indent := measureIndent(line)
 		if indent < baseIndent {
 			break
 		}
@@ -115,68 +115,85 @@ func parseStepNodes(lines []string, start, baseIndent int) ([]stepNode, int, err
 			continue
 		}
 
-		node := stepNode{ordered: isOrdered}
-		node.agentType, node.description = parseStepTitle(text)
-
-		// Collect all child lines with indent > baseIndent until we hit <= baseIndent.
-		childStart := i + 1
-		childEnd := childStart
-		for childEnd < len(lines) {
-			cl := lines[childEnd]
-			if strings.TrimRight(cl, " \t") == "" {
-				childEnd++
-				continue
-			}
-			ci := len(cl) - len(strings.TrimLeft(cl, " \t"))
-			if ci <= baseIndent {
-				break
-			}
-			childEnd++
-		}
-
-		if childStart < childEnd {
-			childLines := lines[childStart:childEnd]
-			childListIndent := -1
-			for _, cl := range childLines {
-				if strings.TrimRight(cl, " \t") == "" {
-					continue
-				}
-				cRest := strings.TrimLeft(cl, " \t")
-				if _, ct := matchListItem(cRest); ct != "" {
-					ci := len(cl) - len(strings.TrimLeft(cl, " \t"))
-					childListIndent = ci
-					break
-				}
-			}
-
-			if childListIndent != -1 {
-				if allChildrenAreProperties(childLines, childListIndent) {
-					for _, cl := range childLines {
-						if strings.TrimRight(cl, " \t") == "" {
-							continue
-						}
-						ci := len(cl) - len(strings.TrimLeft(cl, " \t"))
-						if ci != childListIndent {
-							continue
-						}
-						cRest := strings.TrimLeft(cl, " \t")
-						if _, ct := matchListItem(cRest); ct != "" {
-							parseProperty(ct, &node)
-						}
-					}
-				} else {
-					subNodes, _, _ := parseStepNodes(lines, childStart, childListIndent)
-					if len(subNodes) > 0 {
-						node.subPlan = buildExecutionPlan(subNodes)
-					}
-				}
-			}
-		}
-
+		node, nextIdx := parseStepAt(lines, i, baseIndent, isOrdered, text)
 		nodes = append(nodes, node)
-		i = childEnd
+		i = nextIdx
 	}
 	return nodes, i, nil
+}
+
+// parseStepAt parses a single step starting at line i, including its child content.
+// It returns the parsed node and the index of the next line after this step's content.
+func parseStepAt(lines []string, i, baseIndent int, isOrdered bool, text string) (stepNode, int) {
+	node := stepNode{ordered: isOrdered}
+	node.agentType, node.description = parseStepTitle(text)
+
+	childStart := i + 1
+	childEnd := childStart
+	for childEnd < len(lines) {
+		cl := lines[childEnd]
+		if isEmptyLine(cl) {
+			childEnd++
+			continue
+		}
+		if measureIndent(cl) <= baseIndent {
+			break
+		}
+		childEnd++
+	}
+
+	if childStart < childEnd {
+		childLines := lines[childStart:childEnd]
+		childListIndent := findChildListIndent(childLines)
+		if childListIndent != -1 {
+			if allChildrenAreProperties(childLines, childListIndent) {
+				parseChildProperties(childLines, childListIndent, &node)
+			} else {
+				subNodes, _, _ := parseStepNodes(lines, childStart, childListIndent)
+				if len(subNodes) > 0 {
+					node.subPlan = buildExecutionPlan(subNodes)
+				}
+			}
+		}
+	}
+
+	return node, childEnd
+}
+
+func isEmptyLine(line string) bool {
+	return strings.TrimRight(line, " \t") == ""
+}
+
+func measureIndent(line string) int {
+	return len(line) - len(strings.TrimLeft(line, " \t"))
+}
+
+func findChildListIndent(childLines []string) int {
+	for _, cl := range childLines {
+		if isEmptyLine(cl) {
+			continue
+		}
+		cRest := strings.TrimLeft(cl, " \t")
+		if _, ct := matchListItem(cRest); ct != "" {
+			return measureIndent(cl)
+		}
+	}
+	return -1
+}
+
+func parseChildProperties(childLines []string, listIndent int, node *stepNode) {
+	for _, cl := range childLines {
+		if isEmptyLine(cl) {
+			continue
+		}
+		if measureIndent(cl) != listIndent {
+			continue
+		}
+		cRest := strings.TrimLeft(cl, " \t")
+		if _, ct := matchListItem(cRest); ct != "" {
+			parseProperty(ct, node)
+		}
+	}
 }
 
 func matchListItem(s string) (isOrdered bool, text string) {
@@ -203,14 +220,6 @@ func parseStepTitle(text string) (agentType, description string) {
 	if idx := strings.Index(text, ":"); idx > 0 {
 		agentType = strings.TrimSpace(text[:idx])
 		description = strings.TrimSpace(text[idx+1:])
-		return
-	}
-
-	// Pattern: first word looks like an agent type (contains hyphen).
-	parts := strings.Fields(text)
-	if len(parts) > 0 && strings.Contains(parts[0], "-") {
-		agentType = parts[0]
-		description = strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
 		return
 	}
 

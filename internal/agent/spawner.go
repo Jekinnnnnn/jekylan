@@ -64,3 +64,8 @@ func (s *Spawner) Wait(id string) *RunningAgent {
 func (s *Spawner) Kill(id string) bool {
 	return s.Coord.Kill(id)
 }
+
+// SetPlaybookRunning delegates to the coordinator.
+func (s *Spawner) SetPlaybookRunning(running bool) {
+	s.Coord.SetPlaybookRunning(running)
+}

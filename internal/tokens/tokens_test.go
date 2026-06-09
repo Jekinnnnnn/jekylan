@@ -1,4 +1,4 @@
-package compact
+package tokens
 
 import (
 	"context"
@@ -105,13 +105,13 @@ func TestCountTokensFallbackWhenClientIsNil(t *testing.T) {
 
 func TestGetTokenUsage(t *testing.T) {
 	usage := &message.Usage{InputTokens: 10, OutputTokens: 5}
-	msg := message.Message{Role: message.RoleAssistant, Usage: usage}
+	msg := message.Message{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{Usage: usage}}
 	got := GetTokenUsage(msg)
 	if got != usage {
 		t.Error("GetTokenUsage should return usage for assistant message")
 	}
 
-	userMsg := message.Message{Role: message.RoleUser, Usage: usage}
+	userMsg := message.Message{Role: message.RoleUser, TurnMetadata: message.TurnMetadata{Usage: usage}}
 	if GetTokenUsage(userMsg) != nil {
 		t.Error("GetTokenUsage should return nil for non-assistant message")
 	}
@@ -135,7 +135,7 @@ func TestGetTokenCountFromUsage(t *testing.T) {
 func TestTokenCountFromLastAPIResponse(t *testing.T) {
 	msgs := []message.Message{
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}},
-		{Role: message.RoleAssistant, Usage: &message.Usage{InputTokens: 100, OutputTokens: 50}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{Usage: &message.Usage{InputTokens: 100, OutputTokens: 50}}},
 	}
 	if got := TokenCountFromLastAPIResponse(msgs); got != 150 {
 		t.Errorf("TokenCountFromLastAPIResponse = %d, want 150", got)
@@ -164,7 +164,7 @@ func TestTokenCountWithEstimation(t *testing.T) {
 	// Case 2: Usage on last assistant message.
 	msgs2 := []message.Message{
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hello world"}}},
-		{Role: message.RoleAssistant, Usage: &message.Usage{InputTokens: 100, OutputTokens: 50}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{Usage: &message.Usage{InputTokens: 100, OutputTokens: 50}}},
 	}
 	got2 := TokenCountWithEstimation(msgs2)
 	// 150 from usage + 0 new messages after
@@ -175,9 +175,9 @@ func TestTokenCountWithEstimation(t *testing.T) {
 	// Case 3: Split assistant records with same ResponseID + interleaved tool_results.
 	msgs3 := []message.Message{
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hello"}}},
-		{Role: message.RoleAssistant, ResponseID: "resp-1", Usage: &message.Usage{InputTokens: 100, OutputTokens: 50}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-1", Usage: &message.Usage{InputTokens: 100, OutputTokens: 50}}},
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.ToolResultBlock{ToolUseID: "t1", Content: "result1"}}},
-		{Role: message.RoleAssistant, ResponseID: "resp-1"},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-1"}},
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.ToolResultBlock{ToolUseID: "t2", Content: "result2"}}},
 	}
 	got3 := TokenCountWithEstimation(msgs3)
@@ -193,9 +193,9 @@ func TestTokenCountWithEstimation(t *testing.T) {
 
 	// Case 4: Different ResponseID stops walking.
 	msgs4 := []message.Message{
-		{Role: message.RoleAssistant, ResponseID: "resp-1", Usage: &message.Usage{InputTokens: 50, OutputTokens: 10}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-1", Usage: &message.Usage{InputTokens: 50, OutputTokens: 10}}},
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "a"}}},
-		{Role: message.RoleAssistant, ResponseID: "resp-2", Usage: &message.Usage{InputTokens: 100, OutputTokens: 20}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-2", Usage: &message.Usage{InputTokens: 100, OutputTokens: 20}}},
 	}
 	got4 := TokenCountWithEstimation(msgs4)
 	// Last usage at index 2, walk back: prior at index 0 has different ResponseID → stop.

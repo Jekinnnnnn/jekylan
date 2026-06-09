@@ -15,6 +15,7 @@ import (
 type PlaybookTool struct {
 	PlaybookRegistry *playbook.Registry
 	Spawner          agent.AgentSpawner
+	LifecycleHook    func(running bool)
 }
 
 func (t PlaybookTool) Name() string        { return "playbook" }
@@ -54,7 +55,7 @@ func (t PlaybookTool) Call(ctx context.Context, input map[string]any) (string, e
 		return "", fmt.Errorf("parse playbook %q: %w", name, err)
 	}
 
-	executor := playbook.NewExecutor(t.Spawner)
+	executor := playbook.NewExecutor(t.Spawner, playbook.WithLifecycleHook(t.LifecycleHook))
 
 	if args != "" {
 		// Try JSON object first for multi-variable injection.

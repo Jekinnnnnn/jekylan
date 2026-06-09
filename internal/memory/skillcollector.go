@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -64,6 +65,10 @@ func (sc *SkillCollector) LoadFromMemoryDir() {
 		}
 		return
 	}
+
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -341,6 +346,7 @@ func (sc *SkillCollector) ListSkillExecutionMDFiles(skillName string) []string {
 			files = append(files, filepath.Join(dir, name))
 		}
 	}
+	sort.Strings(files)
 	return files
 }
 

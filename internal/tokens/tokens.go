@@ -1,4 +1,4 @@
-package compact
+package tokens
 
 import (
 	"context"
@@ -27,12 +27,27 @@ func BytesPerTokenForFileType(fileExtension string) float64 {
 // RoughTokenCount returns a fast approximate token count for a string.
 // It divides the string length by bytesPerToken (default 4) and rounds
 // to the nearest integer, matching the TS implementation.
+//
+// When no custom ratio is provided, ASCII characters are estimated at 4 bytes
+// per token and non-ASCII (e.g. CJK) at 1.5 characters per token to avoid
+// severe underestimation for non-English text.
 func RoughTokenCount(s string, bytesPerToken ...float64) int {
-	ratio := 4.0
 	if len(bytesPerToken) > 0 {
-		ratio = bytesPerToken[0]
+		return int(math.Round(float64(len(s)) / bytesPerToken[0]))
 	}
-	return int(math.Round(float64(len(s)) / ratio))
+
+	asciiChars := 0
+	nonAsciiChars := 0
+	for _, r := range s {
+		if r < 128 {
+			asciiChars++
+		} else {
+			nonAsciiChars++
+		}
+	}
+
+	tokens := float64(asciiChars)/4.0 + float64(nonAsciiChars)/1.5
+	return int(math.Round(tokens))
 }
 
 // RoughTokenCountForFile estimates tokens for a file's content, choosing

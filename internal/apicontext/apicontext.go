@@ -1,18 +1,18 @@
-package compact
+package apicontext
 
 import (
 	"encoding/json"
 )
 
-// Default values for context management strategies.
+// Default thresholds for API context management.
 const (
-	defaultMaxInputTokens    = 180_000
-	defaultTargetInputTokens = 40_000
+	DefaultAPIMaxInputTokens    = 180_000
+	DefaultAPITargetInputTokens = 40_000
 )
 
 // Tool names eligible for API-level result clearing.
 var (
-	toolsClearableResults = []string{
+	ToolsClearableResults = []string{
 		"bash",
 		"glob",
 		"grep",
@@ -21,7 +21,7 @@ var (
 		"web_search",
 	}
 
-	toolsClearableUses = []string{
+	ToolsClearableUses = []string{
 		"file_edit",
 		"file_write",
 		"notebook_edit",
@@ -56,6 +56,10 @@ type APIContextManagementOptions struct {
 	HasThinking            bool
 	IsRedactThinkingActive bool
 	ClearAllThinking       bool
+	UseAPIClearToolResults bool
+	UseAPIClearToolUses    bool
+	APIMaxInputTokens      int
+	APITargetInputTokens   int
 }
 
 // GetAPIContextManagement returns API-native context-management configuration.
@@ -64,11 +68,23 @@ func GetAPIContextManagement(options *APIContextManagementOptions) *ContextManag
 	hasThinking := false
 	isRedactThinkingActive := false
 	clearAllThinking := false
+	useClearToolResults := false
+	useClearToolUses := false
+	triggerThreshold := DefaultAPIMaxInputTokens
+	keepTarget := DefaultAPITargetInputTokens
 
 	if options != nil {
 		hasThinking = options.HasThinking
 		isRedactThinkingActive = options.IsRedactThinkingActive
 		clearAllThinking = options.ClearAllThinking
+		useClearToolResults = options.UseAPIClearToolResults
+		useClearToolUses = options.UseAPIClearToolUses
+		if options.APIMaxInputTokens > 0 {
+			triggerThreshold = options.APIMaxInputTokens
+		}
+		if options.APITargetInputTokens > 0 {
+			keepTarget = options.APITargetInputTokens
+		}
 	}
 
 	strategies := make([]ContextEditStrategy, 0)
@@ -88,26 +104,11 @@ func GetAPIContextManagement(options *APIContextManagementOptions) *ContextManag
 		})
 	}
 
-	opts := GetOptions()
-
-	useClearToolResults := opts.UseAPIClearToolResults
-	useClearToolUses := opts.UseAPIClearToolUses
-
 	if !useClearToolResults && !useClearToolUses {
 		if len(strategies) > 0 {
 			return &ContextManagementConfig{Edits: strategies}
 		}
 		return nil
-	}
-
-	triggerThreshold := defaultMaxInputTokens
-	if opts.APIMaxInputTokens > 0 {
-		triggerThreshold = opts.APIMaxInputTokens
-	}
-
-	keepTarget := defaultTargetInputTokens
-	if opts.APITargetInputTokens > 0 {
-		keepTarget = opts.APITargetInputTokens
 	}
 
 	if useClearToolResults {
@@ -121,7 +122,7 @@ func GetAPIContextManagement(options *APIContextManagementOptions) *ContextManag
 				Type:  "input_tokens",
 				Value: triggerThreshold - keepTarget,
 			},
-			ClearToolInputs: toolsClearableResults,
+			ClearToolInputs: ToolsClearableResults,
 		})
 	}
 
@@ -136,7 +137,7 @@ func GetAPIContextManagement(options *APIContextManagementOptions) *ContextManag
 				Type:  "input_tokens",
 				Value: triggerThreshold - keepTarget,
 			},
-			ExcludeTools: toolsClearableUses,
+			ExcludeTools: ToolsClearableUses,
 		})
 	}
 

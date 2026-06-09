@@ -8,6 +8,7 @@ import (
 
 	"github.com/Jekinnnnnn/jekylan/internal/llm"
 	"github.com/Jekinnnnnn/jekylan/internal/message"
+	"github.com/Jekinnnnnn/jekylan/internal/tokens"
 )
 
 const (
@@ -76,8 +77,15 @@ func getEffectiveContextWindowSize(model string) int {
 
 // getAutoCompactThreshold returns the token threshold at which auto-compaction should trigger.
 func getAutoCompactThreshold(model string) int {
+	if opts := GetOptions(); opts.AutoCompactThresholdOverride > 0 {
+		return opts.AutoCompactThresholdOverride
+	}
+
 	effective := getEffectiveContextWindowSize(model)
 	threshold := effective - autoCompactBufferTokens
+	if threshold < 0 {
+		threshold = 0
+	}
 
 	if opts := GetOptions(); opts.AutoCompactPctOverride > 0 && opts.AutoCompactPctOverride <= 100 {
 		pctThreshold := int(float64(effective) * (opts.AutoCompactPctOverride / 100.0))
@@ -176,7 +184,7 @@ func ShouldAutoCompact(ctx context.Context, msgs []message.Message, model string
 		return false
 	}
 
-	tokenCount := TokenCountWithEstimation(msgs) - snipTokensFreed
+	tokenCount := tokens.TokenCountWithEstimation(msgs) - snipTokensFreed
 
 	state := CalculateTokenWarningState(tokenCount, model)
 	if state.IsAboveAutoCompactThreshold {

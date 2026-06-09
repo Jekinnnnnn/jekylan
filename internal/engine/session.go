@@ -13,6 +13,7 @@ import (
 
 // SessionData is the on-disk format for conversation persistence.
 type SessionData struct {
+	Version         int                                      `json:"version"`
 	Messages        []message.Message                        `json:"messages"`
 	TotalUsage      *message.Usage                           `json:"total_usage,omitempty"`
 	SavedAt         time.Time                                `json:"saved_at"`
@@ -37,6 +38,7 @@ func (s SessionData) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON deserializes SessionData, parsing human-readable timestamps.
 func (s *SessionData) UnmarshalJSON(data []byte) error {
 	type raw struct {
+		Version         int                                      `json:"version"`
 		Messages        []message.Message                        `json:"messages"`
 		TotalUsage      *message.Usage                           `json:"total_usage,omitempty"`
 		SavedAt         string                                   `json:"saved_at"`
@@ -47,6 +49,7 @@ func (s *SessionData) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return err
 	}
+	s.Version = r.Version
 	s.Messages = r.Messages
 	s.TotalUsage = r.TotalUsage
 	s.SkillExecutions = r.SkillExecutions
@@ -71,6 +74,7 @@ func (e *Engine) SaveSession(path string) error {
 	// Deep copy messages to avoid data race during JSON serialization.
 	msgs := append([]message.Message(nil), e.messages...)
 	data := SessionData{
+		Version:    1,
 		Messages:   msgs,
 		TotalUsage: e.totalUsage,
 		SavedAt:    time.Now(),

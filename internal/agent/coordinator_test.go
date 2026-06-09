@@ -52,18 +52,13 @@ func TestCoordinator_SpawnAndComplete(t *testing.T) {
 		t.Fatal("expected non-empty id")
 	}
 
-	// Agent completes and is auto-removed; poll Get until gone or completed.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if a := coord.Get(id); a == nil {
-			// Agent removed after completion.
-			return
-		} else if a.Status == StatusCompleted {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	ra := coord.Wait(id)
+	if ra == nil {
+		t.Fatal("expected agent to complete")
 	}
-	t.Fatal("expected agent to complete")
+	if ra.Status != StatusCompleted {
+		t.Fatalf("expected status completed, got %s", ra.Status)
+	}
 }
 
 func TestCoordinator_Kill(t *testing.T) {
@@ -92,14 +87,13 @@ func TestCoordinator_Kill(t *testing.T) {
 		t.Fatal("expected Kill to succeed")
 	}
 	// Kill only cancels context; agent is removed when runner exits.
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if coord.Get(id) == nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	ra := coord.Wait(id)
+	if ra == nil {
+		t.Fatal("expected agent to be removed after runner exits")
 	}
-	t.Fatal("expected agent to be removed after runner exits")
+	if ra.Status != StatusKilled {
+		t.Fatalf("expected status killed, got %s", ra.Status)
+	}
 }
 
 func TestCoordinator_List(t *testing.T) {
@@ -158,14 +152,8 @@ func TestCoordinator_KillAlreadyCompleted(t *testing.T) {
 		QueryRunner: mq.run,
 	})
 
-	// Wait for the agent to complete and be auto-removed.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if coord.Get(id) == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Wait for the agent to complete.
+	coord.Wait(id)
 
 	if coord.Kill(id) {
 		t.Fatal("expected Kill to fail for already-completed agent")
@@ -185,20 +173,16 @@ func TestCoordinator_AgentError(t *testing.T) {
 		QueryRunner: mq.run,
 	})
 
-	// Agent errors and is auto-removed; poll Get until gone or errored.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if a := coord.Get(id); a == nil {
-			return
-		} else if a.Status == StatusError {
-			if !strings.Contains(a.Error, "something broke") {
-				t.Fatalf("expected error message in agent, got %q", a.Error)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	ra := coord.Wait(id)
+	if ra == nil {
+		t.Fatal("expected agent to error")
 	}
-	t.Fatal("expected agent to error")
+	if ra.Status != StatusError {
+		t.Fatalf("expected status error, got %s", ra.Status)
+	}
+	if !strings.Contains(ra.Error, "something broke") {
+		t.Fatalf("expected error message in agent, got %q", ra.Error)
+	}
 }
 
 func TestCoordinator_AgentResult(t *testing.T) {
@@ -214,20 +198,16 @@ func TestCoordinator_AgentResult(t *testing.T) {
 		QueryRunner: mq.run,
 	})
 
-	// Agent completes and is auto-removed; poll Get until gone or completed.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if a := coord.Get(id); a == nil {
-			return
-		} else if a.Status == StatusCompleted {
-			if !strings.Contains(a.Result, "final result") {
-				t.Fatalf("expected result in agent, got %q", a.Result)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	ra := coord.Wait(id)
+	if ra == nil {
+		t.Fatal("expected agent to complete with result")
 	}
-	t.Fatal("expected agent to complete with result")
+	if ra.Status != StatusCompleted {
+		t.Fatalf("expected status completed, got %s", ra.Status)
+	}
+	if !strings.Contains(ra.Result, "final result") {
+		t.Fatalf("expected result in agent, got %q", ra.Result)
+	}
 }
 
 func TestCoordinator_AgentGetWhileRunning(t *testing.T) {
@@ -300,30 +280,29 @@ func TestCoordinator_UsageTracking(t *testing.T) {
 		events: []query.Event{
 			{Type: "usage", Message: message.Message{
 				Role: message.RoleAssistant,
-				Usage: &message.Usage{
+				TurnMetadata: message.TurnMetadata{Usage: &message.Usage{
 					InputTokens:  100,
 					OutputTokens: 50,
-				},
+				}},
 			}},
 			{Type: "result", Result: query.Result{Success: true, Text: "done"}},
 		},
 	}
 
-	coord.Spawn(context.Background(), &Definition{Name: "test"}, "do it", RunnerOptions{
+	id := coord.Spawn(context.Background(), &Definition{Name: "test"}, "do it", RunnerOptions{
 		QueryRunner: mq.run,
 	})
 
-	// Wait for the agent to complete and be removed.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if tu := coord.TotalUsage(); tu != nil {
-			if tu.InputTokens == 100 && tu.OutputTokens == 50 {
-				return
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	// Wait for the agent to complete.
+	coord.Wait(id)
+
+	tu := coord.TotalUsage()
+	if tu == nil {
+		t.Fatal("expected usage to be accumulated, got nil")
 	}
-	t.Fatalf("expected usage to be accumulated, got: %v", coord.TotalUsage())
+	if tu.InputTokens != 100 || tu.OutputTokens != 50 {
+		t.Fatalf("expected usage 100/50, got: %v", tu)
+	}
 }
 
 // TestCoordinator_ConfirmForward verifies that confirmation requests from
@@ -380,15 +359,9 @@ func TestCoordinator_WaitAfterComplete(t *testing.T) {
 	})
 
 	// Wait for the agent to finish.
-	for {
-		a := coord.Get(id)
-		if a == nil || a.Status != StatusRunning {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	coord.Wait(id)
 
-	// Now call Wait — the agent is already gone from c.agents.
+	// Now call Wait again — the agent is already gone from c.agents.
 	ra := coord.Wait(id)
 	if ra == nil {
 		t.Fatal("expected Wait to return completed agent, got nil")
@@ -417,7 +390,9 @@ func TestCoordinator_WaitReturnsClone(t *testing.T) {
 		QueryRunner: mq.run,
 	})
 
-	// Wait for completion.
+	// Wait for completion via polling so the agent is already in completedAgents
+	// when Wait is called, matching the test's expectation that the first Wait
+	// drains the completed agent and the second returns nil.
 	for {
 		a := coord.Get(id)
 		if a == nil || a.Status != StatusRunning {
@@ -484,13 +459,7 @@ func TestCoordinator_ConfirmAfterAgentExits(t *testing.T) {
 	coord.Kill(id)
 
 	// Wait for agent to be removed.
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if coord.Get(id) == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	coord.Wait(id)
 
 	// Confirm after agent is gone should return false without panic.
 	if coord.Confirm(id, true) {

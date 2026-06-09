@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Jekinnnnnn/jekylan/internal/message"
@@ -27,6 +28,16 @@ type TurnEndWork struct {
 	StopReason        string
 }
 
+// Worker is the interface exposed by MemoryWorker.
+// Engine depends on this interface rather than the concrete type.
+type Worker interface {
+	Start()
+	Stop()
+	HandleTurnEnd(msgs []message.Message, workflowCompleted bool, stopReason string) bool
+	SkillCollector() *SkillCollector
+	CompactAnalysis(skillName string) error
+}
+
 // MemoryWorker runs in a background goroutine. It receives conversation
 // messages through a channel, compacts them (removing noise), and uses
 // an LLM with the memory prompt as system message to generate summaries.
@@ -35,6 +46,8 @@ type MemoryWorker struct {
 	queryFunc      QueryFunc
 	turnEndCh      chan TurnEndWork
 	done           chan struct{}
+	stopOnce       sync.Once
+	wg             sync.WaitGroup
 	skillCollector *SkillCollector
 }
 
@@ -59,13 +72,23 @@ func (mw *MemoryWorker) SkillCollector() *SkillCollector {
 
 // Start begins the background goroutines.
 func (mw *MemoryWorker) Start() {
-	go mw.run()
-	go mw.watchSkillExecutions()
+	mw.wg.Add(2)
+	go func() {
+		defer mw.wg.Done()
+		mw.run()
+	}()
+	go func() {
+		defer mw.wg.Done()
+		mw.watchSkillExecutions()
+	}()
 }
 
-// Stop signals the worker to shut down.
+// Stop signals the worker to shut down and waits for goroutines to finish.
 func (mw *MemoryWorker) Stop() {
-	close(mw.done)
+	mw.stopOnce.Do(func() {
+		close(mw.done)
+	})
+	mw.wg.Wait()
 }
 
 // watchSkillExecutions watches the skill-executions directory for new files.
@@ -116,7 +139,7 @@ func (mw *MemoryWorker) watchSkillExecutions() {
 			}
 			dir := filepath.Dir(event.Name)
 			skillName := filepath.Base(dir)
-			mw.checkSkillThreshold(skillName)
+			go mw.checkSkillThreshold(skillName)
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
@@ -182,7 +205,6 @@ func (mw *MemoryWorker) TriggerSkillAnalysis(skillName string) {
 		fmt.Fprintf(os.Stderr, "[memory-worker] failed to create batch dir: %v\n", err)
 		return
 	}
-	defer os.RemoveAll(batchDir)
 
 	// Atomically move files into the batch directory. If another goroutine
 	// already renamed a file, os.Rename returns an error and we skip it.
@@ -266,9 +288,10 @@ func (mw *MemoryWorker) TriggerSkillAnalysis(skillName string) {
 	}
 
 	if fileWriteCalled {
+		os.RemoveAll(batchDir)
 		fmt.Fprintf(os.Stderr, "[memory-worker] analysis for %q written via file_write to %s\n", skillName, analysisPath)
 	} else {
-		fmt.Fprintf(os.Stderr, "[memory-worker] analysis for %q: LLM did not call file_write\n", skillName)
+		fmt.Fprintf(os.Stderr, "[memory-worker] analysis for %q: LLM did not call file_write. Original records preserved in %s\n", skillName, batchDir)
 	}
 }
 
@@ -323,7 +346,7 @@ func (mw *MemoryWorker) saveSkillExecutionMD(skillName string, messages []messag
 		fmt.Fprintf(os.Stderr, "[memory-worker] failed to create execution dir: %v\n", err)
 		return
 	}
-	filename := fmt.Sprintf("%s_%d-%d.md", time.Now().Format("20060102_150405"), start, end)
+	filename := fmt.Sprintf("%s_%d-%d.md", time.Now().Format("20060102_150405.000"), start, end)
 	path := filepath.Join(dir, filename)
 	if err := os.WriteFile(path, []byte(mdContent), 0644); err != nil {
 		fmt.Fprintf(os.Stderr, "[memory-worker] failed to write execution md: %v\n", err)

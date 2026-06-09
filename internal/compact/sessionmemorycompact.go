@@ -2,9 +2,11 @@ package compact
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Jekinnnnnn/jekylan/internal/message"
+	"github.com/Jekinnnnnn/jekylan/internal/tokens"
 )
 
 // SessionMemoryCompactConfig holds thresholds for session-memory compaction.
@@ -21,46 +23,32 @@ var defaultSMCompactConfig = SessionMemoryCompactConfig{
 	MaxTokens:            40_000,
 }
 
+// smCompactConfig is the active session-memory compact configuration.
+// It is kept in sync with global options by syncSMCompactConfigFromOptions.
 var (
 	smCompactConfig   = defaultSMCompactConfig
-	configInitialized bool
+	smCompactConfigMu sync.RWMutex
 )
 
 // SetSessionMemoryCompactConfig updates the session-memory compact configuration.
 func SetSessionMemoryCompactConfig(cfg SessionMemoryCompactConfig) {
+	smCompactConfigMu.Lock()
+	defer smCompactConfigMu.Unlock()
 	smCompactConfig = cfg
 }
 
 // GetSessionMemoryCompactConfig returns a copy of the current configuration.
 func GetSessionMemoryCompactConfig() SessionMemoryCompactConfig {
+	smCompactConfigMu.RLock()
+	defer smCompactConfigMu.RUnlock()
 	return smCompactConfig
 }
 
 // ResetSessionMemoryCompactConfig resets config to defaults.
 func ResetSessionMemoryCompactConfig() {
+	smCompactConfigMu.Lock()
+	defer smCompactConfigMu.Unlock()
 	smCompactConfig = defaultSMCompactConfig
-	configInitialized = false
-}
-
-// initSessionMemoryCompactConfig loads overrides from global options.
-func initSessionMemoryCompactConfig() {
-	if configInitialized {
-		return
-	}
-	configInitialized = true
-
-	cfg := defaultSMCompactConfig
-	opts := GetOptions()
-	if opts.SMCompactMinTokens > 0 {
-		cfg.MinTokens = opts.SMCompactMinTokens
-	}
-	if opts.SMCompactMinTextBlockMessages > 0 {
-		cfg.MinTextBlockMessages = opts.SMCompactMinTextBlockMessages
-	}
-	if opts.SMCompactMaxTokens > 0 {
-		cfg.MaxTokens = opts.SMCompactMaxTokens
-	}
-	smCompactConfig = cfg
 }
 
 // hasTextBlocks returns true when the message contains visible text content.
@@ -173,6 +161,16 @@ func adjustIndexToPreserveAPIInvariants(msgs []message.Message, startIndex int) 
 	return adjusted
 }
 
+// estimateSingleMessageTokens returns a rough token count for a single message
+// without allocating a new slice.
+func estimateSingleMessageTokens(msg message.Message) int {
+	total := 0
+	for _, block := range msg.Content {
+		total += tokens.RoughTokenCountForBlock(block)
+	}
+	return total
+}
+
 // calculateMessagesToKeepIndex computes the first index of messages that should
 // be preserved after compaction. It starts from lastSummarizedIndex+1 and
 // expands backwards until minTokens, minTextBlockMessages, or maxTokens is hit.
@@ -181,7 +179,6 @@ func calculateMessagesToKeepIndex(msgs []message.Message, lastSummarizedIndex in
 		return 0
 	}
 
-	initSessionMemoryCompactConfig()
 	cfg := GetSessionMemoryCompactConfig()
 
 	startIndex := lastSummarizedIndex + 1
@@ -192,7 +189,7 @@ func calculateMessagesToKeepIndex(msgs []message.Message, lastSummarizedIndex in
 	totalTokens := 0
 	textBlockMessageCount := 0
 	for i := startIndex; i < len(msgs); i++ {
-		totalTokens += EstimateMessageTokens([]message.Message{msgs[i]})
+		totalTokens += estimateSingleMessageTokens(msgs[i])
 		if hasTextBlocks(msgs[i]) {
 			textBlockMessageCount++
 		}
@@ -207,8 +204,7 @@ func calculateMessagesToKeepIndex(msgs []message.Message, lastSummarizedIndex in
 
 	// Expand backwards. Floor at 0 (no compact boundary message type in Go MVP).
 	for i := startIndex - 1; i >= 0; i-- {
-		msgTokens := EstimateMessageTokens([]message.Message{msgs[i]})
-		totalTokens += msgTokens
+		totalTokens += estimateSingleMessageTokens(msgs[i])
 		if hasTextBlocks(msgs[i]) {
 			textBlockMessageCount++
 		}
@@ -258,7 +254,7 @@ func createCompactionResultFromSessionMemory(
 	messagesToKeep []message.Message,
 	transcriptPath string,
 ) *Result {
-	_ = TokenCountFromLastAPIResponse(msgs) // reserved for telemetry
+	_ = tokens.TokenCountFromLastAPIResponse(msgs) // reserved for telemetry
 
 	boundary := message.Message{Role: message.RoleSystem, Timestamp: time.Now()}
 	boundary.AddText("[Compact boundary: earlier conversation summarized below]")
@@ -330,7 +326,7 @@ func TrySessionMemoryCompaction(
 	}
 
 	result := createCompactionResultFromSessionMemory(msgs, sessionMemory, messagesToKeep, "")
-	result.PostCompactTokens = EstimateMessageTokens(result.Messages)
+	result.PostCompactTokens = tokens.EstimateMessageTokens(result.Messages)
 
 	if autoCompactThreshold > 0 && result.PostCompactTokens >= autoCompactThreshold {
 		return nil

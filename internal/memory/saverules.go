@@ -65,13 +65,16 @@ func LoadSaveRules(memoryDir string) (*SaveRuleset, error) {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "[save-rules] failed to read %s: %v\n", path, err)
 			continue
 		}
 		var cfg SaveRuleConfig
 		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			fmt.Fprintf(os.Stderr, "[save-rules] failed to parse %s: %v\n", path, err)
 			continue
 		}
 		if !cfg.Enabled || cfg.Type == "" {
+			fmt.Fprintf(os.Stderr, "[save-rules] skipping %s: disabled or missing type\n", path)
 			continue
 		}
 		if cfg.Type == "all" {
@@ -90,28 +93,39 @@ func LoadSaveRules(memoryDir string) (*SaveRuleset, error) {
 
 // mergeRule merges a new config into an existing one. Incoming fields override
 // existing ones for scalar values; conditions and exclusions are appended.
+func xmlEscape(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	return s
+}
+
 func mergeRule(existing, incoming *SaveRuleConfig) *SaveRuleConfig {
 	if existing == nil {
 		return incoming
 	}
-	existing.Conditions = append(existing.Conditions, incoming.Conditions...)
-	existing.Exclusions = append(existing.Exclusions, incoming.Exclusions...)
+	out := *existing
+	out.Conditions = append([]SaveRuleCondition(nil), existing.Conditions...)
+	out.Conditions = append(out.Conditions, incoming.Conditions...)
+	out.Exclusions = append([]string(nil), existing.Exclusions...)
+	out.Exclusions = append(out.Exclusions, incoming.Exclusions...)
 	if incoming.Description != "" {
-		existing.Description = incoming.Description
+		out.Description = incoming.Description
 	}
 	if incoming.WhenToSave != "" {
-		existing.WhenToSave = incoming.WhenToSave
+		out.WhenToSave = incoming.WhenToSave
 	}
 	if incoming.HowToUse != "" {
-		existing.HowToUse = incoming.HowToUse
+		out.HowToUse = incoming.HowToUse
 	}
 	if len(incoming.Examples) > 0 {
-		existing.Examples = incoming.Examples
+		out.Examples = incoming.Examples
 	}
 	if incoming.BodyStructure != "" {
-		existing.BodyStructure = incoming.BodyStructure
+		out.BodyStructure = incoming.BodyStructure
 	}
-	return existing
+	return &out
 }
 
 // BuildTypesSection generates the `## Types of memory` section from the
@@ -136,23 +150,23 @@ func (rs *SaveRuleset) BuildTypesSection() string {
 		sections = append(sections, "<type>")
 		sections = append(sections, fmt.Sprintf("    <name>%s</name>", mt))
 		if rule.Description != "" {
-			sections = append(sections, fmt.Sprintf("    <description>%s</description>", rule.Description))
+			sections = append(sections, fmt.Sprintf("    <description>%s</description>", xmlEscape(rule.Description)))
 		}
 		if rule.WhenToSave != "" {
-			sections = append(sections, fmt.Sprintf("    <when_to_save>%s</when_to_save>", rule.WhenToSave))
+			sections = append(sections, fmt.Sprintf("    <when_to_save>%s</when_to_save>", xmlEscape(rule.WhenToSave)))
 		}
 		if rule.HowToUse != "" {
-			sections = append(sections, fmt.Sprintf("    <how_to_use>%s</how_to_use>", rule.HowToUse))
+			sections = append(sections, fmt.Sprintf("    <how_to_use>%s</how_to_use>", xmlEscape(rule.HowToUse)))
 		}
 		if len(rule.Examples) > 0 {
 			sections = append(sections, "    <examples>")
 			for _, ex := range rule.Examples {
-				sections = append(sections, fmt.Sprintf("    %s", ex))
+				sections = append(sections, fmt.Sprintf("    %s", xmlEscape(ex)))
 			}
 			sections = append(sections, "    </examples>")
 		}
 		if rule.BodyStructure != "" {
-			sections = append(sections, fmt.Sprintf("    <body_structure>%s</body_structure>", rule.BodyStructure))
+			sections = append(sections, fmt.Sprintf("    <body_structure>%s</body_structure>", xmlEscape(rule.BodyStructure)))
 		}
 		sections = append(sections, "</type>")
 	}

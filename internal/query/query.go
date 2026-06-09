@@ -2,7 +2,6 @@ package query
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sync"
@@ -11,20 +10,28 @@ import (
 	"github.com/Jekinnnnnn/jekylan/internal/compact"
 	"github.com/Jekinnnnnn/jekylan/internal/llm"
 	"github.com/Jekinnnnnn/jekylan/internal/message"
+	"github.com/Jekinnnnnn/jekylan/internal/tokens"
 	"github.com/Jekinnnnnn/jekylan/internal/tool"
 )
 
-// debugEnabled is initialized once from JEKYLAN_DEBUG env var.
-var debugEnabled = os.Getenv("JEKYLAN_DEBUG") != ""
-
-func debugLog(format string, args ...any) {
-	if debugEnabled {
+func debugLog(enabled bool, format string, args ...any) {
+	if enabled {
 		fmt.Fprintf(os.Stderr, "[jekylan-debug] "+format, args...)
 	}
 }
 
 // ErrQueryAborted is returned when the query is interrupted via context cancellation.
 var ErrQueryAborted = fmt.Errorf("query aborted")
+
+// QuerySource identifies where a query originates.
+type QuerySource string
+
+const (
+	QuerySourceEngine        QuerySource = "engine"
+	QuerySourceAgent         QuerySource = "agent"
+	QuerySourceCompact       QuerySource = "compact"
+	QuerySourceSessionMemory QuerySource = "session_memory"
+)
 
 // Params holds the configuration for a single query loop.
 type Params struct {
@@ -36,7 +43,7 @@ type Params struct {
 	ThinkingBudget int64
 	Client         llm.Client
 	DisableCompact bool
-	QuerySource    string
+	QuerySource    QuerySource
 	// CacheBreakpoints controls Anthropic prompt caching breakpoints.
 	// 0 = disabled, 1 = system, 2 = system+tools, 3 = system+tools+messages.
 	CacheBreakpoints int
@@ -47,6 +54,8 @@ type Params struct {
 	// tool is flagged as risky, the callback blocks until the user approves or
 	// rejects the operation. A returned error or !approved aborts the tool call.
 	ConfirmTool func(ctx context.Context, toolName string, input map[string]any) (bool, error)
+	// Debug enables verbose debug logging to stderr.
+	Debug bool
 }
 
 // Event represents an output from the query loop.
@@ -75,36 +84,6 @@ type Result struct {
 	Error      string
 }
 
-// finalizeToolUse parses accumulated tool input JSON, adds the tool_use
-// to the assistant message, and emits an event. Returns true if a tool_use
-// was finalized.
-func finalizeToolUse(
-	currentToolUse *message.ToolUseBlock,
-	currentToolInputJSON string,
-	assistantMsg *message.Message,
-	out chan<- Event,
-) (*message.ToolUseBlock, bool) {
-	if currentToolUse == nil {
-		return nil, false
-	}
-	if currentToolInputJSON != "" {
-		var inputMap map[string]any
-		if err := json.Unmarshal([]byte(currentToolInputJSON), &inputMap); err != nil {
-			debugLog("tool input JSON parse error: %v\n", err)
-		} else {
-			currentToolUse.Input = inputMap
-		}
-	}
-	assistantMsg.AddToolUse(currentToolUse.ID, currentToolUse.Name, currentToolUse.Input)
-	out <- Event{
-		Type:      "assistant_tool_use",
-		ToolUseID: currentToolUse.ID,
-		ToolName:  currentToolUse.Name,
-		ToolInput: currentToolUse.Input,
-	}
-	return nil, true
-}
-
 // Query runs the multi-turn conversation loop with the LLM API.
 func Query(ctx context.Context, params Params) <-chan Event {
 	out := make(chan Event)
@@ -114,7 +93,7 @@ func Query(ctx context.Context, params Params) <-chan Event {
 
 		client := params.Client
 		if client == nil {
-			out <- Event{Type: "error", Result: Result{Error: "LLM client is nil"}}
+			out <- Event{Type: EventTypeError, Result: Result{Error: "LLM client is nil"}}
 			return
 		}
 
@@ -124,13 +103,13 @@ func Query(ctx context.Context, params Params) <-chan Event {
 
 		for {
 			if err := ctx.Err(); err != nil {
-				out <- Event{Type: "error", Result: Result{Error: ErrQueryAborted.Error()}}
+				out <- Event{Type: EventTypeError, Result: Result{Error: ErrQueryAborted.Error()}}
 				return
 			}
 
 			if params.MaxTurns > 0 && turnCount > params.MaxTurns {
 				out <- Event{
-					Type: "result",
+					Type: EventTypeResult,
 					Result: Result{
 						Success:  false,
 						Error:    fmt.Sprintf("Reached maximum number of turns (%d)", params.MaxTurns),
@@ -141,63 +120,11 @@ func Query(ctx context.Context, params Params) <-chan Event {
 			}
 
 			// --- Compaction pipeline ---
-			var snipResult compact.SnipResult
-			compactedThisTurn := false
-			if !params.DisableCompact {
-				// 1. Snip (stub in MVP)
-				snipResult = compact.SnipCompactIfNeeded(msgs)
-				msgs = snipResult.Messages
-
-				// 2. Microcompact
-				mcResult := compact.MicrocompactMessages(msgs)
-				if mcResult.Changed {
-					debugLog("tri micro compact\n")
-					for _, m := range mcResult.Messages {
-						for _, block := range m.Content {
-							if tr, ok := block.(message.ToolResultBlock); ok {
-								debugLog("micro tool_result %s: %s\n", tr.ToolUseID, tr.Content)
-							}
-						}
-					}
-					msgs = mcResult.Messages
-				}
-
-				// 3. Auto-compact
-				if compact.ShouldAutoCompact(ctx, msgs, params.Model, client, compact.QuerySource(params.QuerySource), snipResult.TokensFreed) {
-					debugLog("auto-compact starting (turn %d)\n", turnCount)
-					wasCompacted, compactResult, nextFailures, err := compact.AutoCompactIfNeeded(ctx, msgs, params.Model, client, compact.QuerySource(params.QuerySource), &autoCompactTracking, snipResult.TokensFreed)
-					autoCompactTracking.ConsecutiveFailures = nextFailures
-					if err != nil {
-						debugLog("auto-compact error: %v\n", err)
-						out <- Event{Type: "error", Result: Result{Error: fmt.Sprintf("autocompact failed: %v", err)}}
-						return
-					}
-					if wasCompacted && compactResult != nil {
-						debugLog("auto-compact success: %d -> %d messages\n", len(msgs), len(compactResult.Messages))
-						msgs = compactResult.Messages
-						out <- Event{Type: "compaction_result", Messages: compactResult.Messages}
-						autoCompactTracking.Compacted = true
-						autoCompactTracking.TurnCounter = turnCount
-						autoCompactTracking.TurnID = fmt.Sprintf("turn-%d", turnCount)
-						compactedThisTurn = true
-					}
-				} else {
-					autoCompactTracking.ConsecutiveFailures = 0
-				}
-			}
-
-			// Block if we've hit the hard blocking limit (only when auto-compact
-			// is ON and compaction did not fire this turn). Skip for compact/
-			// session_memory queries to avoid deadlocking forked agents.
-			if !compactedThisTurn &&
-				params.QuerySource != "compact" &&
-				params.QuerySource != "session_memory" {
-				tokenCount := compact.TokenCountWithEstimation(msgs) - snipResult.TokensFreed
-				state := compact.CalculateTokenWarningState(tokenCount, params.Model)
-				if state.IsAtBlockingLimit {
-					out <- Event{Type: "error", Result: Result{Error: "Context is too large. Run /compact to reduce context size."}}
-					return
-				}
+			var err error
+			msgs, _, err = runCompactionPipeline(ctx, msgs, params, turnCount, &autoCompactTracking, out)
+			if err != nil {
+				out <- Event{Type: EventTypeError, Result: Result{Error: err.Error()}}
+				return
 			}
 
 			// --- Streaming with fallback model retry ---
@@ -214,7 +141,7 @@ func Query(ctx context.Context, params Params) <-chan Event {
 				stream, err := client.StreamMessages(ctx, msgs, params.SystemPrompt, params.Tools, params.ThinkingBudget, params.CacheBreakpoints)
 				if err != nil {
 					if llm.IsPromptTooLongError(err) {
-						assistantMsg = newPromptTooLongAssistantMessage(err)
+						assistantMsg = newPromptTooLongAssistantMessage(err.Error())
 						isPTL = true
 						break
 					}
@@ -225,203 +152,62 @@ func Query(ctx context.Context, params Params) <-chan Event {
 						attemptWithFallback = true
 						continue
 					}
-					out <- Event{Type: "error", Result: Result{Error: err.Error()}}
+					out <- Event{Type: EventTypeError, Result: Result{Error: err.Error()}}
 					return
 				}
 
-				assistantMsg = message.Message{Role: message.RoleAssistant}
-				var currentText string
-				var currentToolUse *message.ToolUseBlock
-				var currentToolInputJSON string
-				var currentThinking string
-				var currentSignature string
-				var currentRedacted string
-				var currentBlockType string
-				var currentUsage *message.Usage
-				var currentResponseID string
-				hasToolUse = false
-				stopReason = ""
-
-			streamLoop:
+				parser := newStreamParser(out, params.Debug)
 				for evt := range stream {
 					if err := ctx.Err(); err != nil {
-						out <- Event{Type: "error", Result: Result{Error: ErrQueryAborted.Error()}}
+						out <- Event{Type: EventTypeError, Result: Result{Error: ErrQueryAborted.Error()}}
 						return
 					}
-					switch evt.Type {
-					case "message_start":
-						if evt.ResponseID != "" {
-							currentResponseID = evt.ResponseID
-						}
-						if evt.Usage != nil {
-							currentUsage = mergeUsage(currentUsage, evt.Usage)
-						}
-					case "usage":
-						if evt.Usage != nil {
-							currentUsage = mergeUsage(currentUsage, evt.Usage)
-						}
-					case "content_block_start":
-						currentBlockType = evt.BlockType
-						switch evt.BlockType {
-						case "text":
-							currentText = ""
-						case "tool_use":
-							currentToolUse = &message.ToolUseBlock{
-								ID:   evt.BlockID,
-								Name: evt.BlockName,
-							}
-							if evt.BlockInput != nil {
-								currentToolUse.Input = evt.BlockInput
-							}
-							currentToolInputJSON = ""
-						case "thinking":
-							currentThinking = evt.BlockThinking
-							currentSignature = evt.BlockSignature
-						case "redacted_thinking":
-							currentRedacted = evt.BlockRedacted
-						}
-					case "assistant_text":
-						// Same text-delta handling as content_block_delta below;
-						// duplicated because Anthropic and OpenAI use different event types.
-						if evt.TextDelta != "" {
-							currentText += evt.TextDelta
-							out <- Event{Type: "assistant_text", Text: evt.TextDelta}
-						}
-					case "assistant_tool_use":
-						if evt.ResponseID != "" && currentResponseID == "" {
-							currentResponseID = evt.ResponseID
-						}
-						if currentToolUse == nil || currentToolUse.ID != evt.ToolUseID {
-							currentToolUse = &message.ToolUseBlock{
-								ID:   evt.ToolUseID,
-								Name: evt.ToolName,
-							}
-							currentToolInputJSON = ""
-						}
-						currentToolInputJSON += evt.InputJSON
-					case "content_block_delta":
-						if evt.TextDelta != "" {
-							currentText += evt.TextDelta
-							out <- Event{Type: "assistant_text", Text: evt.TextDelta}
-						} else if evt.InputJSON != "" && currentToolUse != nil {
-							currentToolInputJSON += evt.InputJSON
-						} else if evt.ThinkingDelta != "" {
-							currentThinking += evt.ThinkingDelta
-						} else if evt.SignatureDelta != "" {
-							currentSignature += evt.SignatureDelta
-						}
-					case "content_block_stop":
-						switch currentBlockType {
-						case "tool_use":
-							var finalized bool
-							currentToolUse, finalized = finalizeToolUse(currentToolUse, currentToolInputJSON, &assistantMsg, out)
-							if finalized {
-								hasToolUse = true
-							}
-							currentToolInputJSON = ""
-						case "thinking":
-							assistantMsg.Content = append(assistantMsg.Content, message.ThinkingBlock{
-								Thinking:  currentThinking,
-								Signature: currentSignature,
-							})
-							currentThinking = ""
-							currentSignature = ""
-						case "redacted_thinking":
-							assistantMsg.Content = append(assistantMsg.Content, message.RedactedThinkingBlock{
-								Data: currentRedacted,
-							})
-							currentRedacted = ""
-						default:
-							assistantMsg.AddText(currentText)
-							currentText = ""
-						}
-						currentBlockType = ""
-					case "message_delta":
-						if evt.StopReason != "" {
-							stopReason = evt.StopReason
-						}
-						if evt.Usage != nil {
-							currentUsage = mergeUsage(currentUsage, evt.Usage)
-						}
-					case "error":
-						if llm.IsPromptTooLongErrorString(evt.TextDelta) {
-							assistantMsg = newPromptTooLongAssistantMessageFromText(evt.TextDelta)
-							isPTL = true
-							break streamLoop
-						}
-						out <- Event{Type: "error", Result: Result{Error: evt.TextDelta}}
+					breakLoop, abortErr := parser.process(evt)
+					if abortErr != "" {
+						out <- Event{Type: EventTypeError, Result: Result{Error: abortErr}}
 						return
+					}
+					if breakLoop {
+						break
 					}
 				}
 
+				isPTL = parser.isPTL
 				if isPTL {
 					break
 				}
 
-				// OpenAI does not emit content_block_start/stop; flush any
-				// accumulated text that was never committed.
-				if currentText != "" {
-					assistantMsg.AddText(currentText)
-					currentText = ""
-				}
-
-				// OpenAI may have pending tool_use that was never closed by content_block_stop
-				if currentToolUse != nil {
-					var finalized bool
-					currentToolUse, finalized = finalizeToolUse(currentToolUse, currentToolInputJSON, &assistantMsg, out)
-					if finalized {
-						hasToolUse = true
-					}
-					currentToolInputJSON = ""
-				}
-
-				assistantMsg.Usage = currentUsage
-				assistantMsg.ResponseID = currentResponseID
-				assistantMsg.Timestamp = time.Now()
+				parser.flushOpenAI()
+				assistantMsg = parser.finalizeAssistantMsg()
+				hasToolUse = parser.hasToolUse
+				stopReason = parser.stopReason
 			}
 
 			if !isPTL {
 				msgs = append(msgs, assistantMsg)
-				out <- Event{Type: "usage", Message: assistantMsg}
+				out <- Event{Type: EventTypeUsage, Message: assistantMsg}
 			}
 
-			// --- Prompt-too-long recovery ---
+			// --- Recovery paths ---
 			if isPTL {
-				recoveryResult := compact.ReactiveCompactOnPromptTooLong(msgs, nil)
-				if recoveryResult.OK && recoveryResult.Result != nil {
-					msgs = recoveryResult.Result.Messages
+				if newMsgs, ok := maybeRecoverPromptTooLong(msgs, assistantMsg, turnCount, out); ok {
+					msgs = newMsgs
 					continue
-				}
-				out <- Event{
-					Type: "result",
-					Result: Result{
-						Success:    false,
-						Error:      assistantMsg.TextContent(),
-						StopReason: "prompt_too_long",
-						NumTurns:   turnCount,
-					},
 				}
 				return
 			}
 
-			// --- Max output tokens recovery ---
-			if !hasToolUse && stopReason == "max_output_tokens" {
-				recoveryMsg := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
-				recoveryMsg.AddText(
-					"Output token limit hit. Resume directly — no apology, no recap of what you were doing. " +
-						"Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
-				)
-				msgs = append(msgs, recoveryMsg)
-				out <- Event{Type: "user_message", Message: recoveryMsg}
+			if newMsgs, ok := maybeRecoverMaxOutputTokens(msgs, hasToolUse, stopReason, out); ok {
+				msgs = newMsgs
 				continue
 			}
 
 			if !hasToolUse {
 				if stopReason == "" {
-					stopReason = "end_turn"
+					stopReason = StopReasonEndTurn
 				}
 				out <- Event{
-					Type: "result",
+					Type: EventTypeResult,
 					Result: Result{
 						Success:    true,
 						Text:       assistantMsg.TextContent(),
@@ -439,72 +225,15 @@ func Query(ctx context.Context, params Params) <-chan Event {
 						synthMsg.AddToolResult(tu.ID, "[Tool execution interrupted]", true)
 					}
 					msgs = append(msgs, synthMsg)
-					out <- Event{Type: "user_message", Message: synthMsg}
+					out <- Event{Type: EventTypeUserMessage, Message: synthMsg}
 				}
-				out <- Event{Type: "error", Result: Result{Error: ErrQueryAborted.Error()}}
+				out <- Event{Type: EventTypeError, Result: Result{Error: ErrQueryAborted.Error()}}
 				return
 			}
 
-			toolUses := assistantMsg.ToolUses()
-			type indexedToolResult struct {
-				idx       int
-				toolUseID string
-				result    string
-				isErr     bool
-			}
-			resultCh := make(chan indexedToolResult, len(toolUses))
-
-			var wg sync.WaitGroup
-			for i, tu := range toolUses {
-				wg.Add(1)
-				go func(idx int, block message.ToolUseBlock) {
-					defer wg.Done()
-					t := params.Tools.Find(block.Name)
-					var result string
-					var isErr bool
-					if t == nil {
-						result = fmt.Sprintf("Tool %q not found", block.Name)
-						isErr = true
-					} else {
-						// Check if tool requires user confirmation.
-						if params.ConfirmTool != nil && isRiskyTool(block.Name) {
-							approved, err := params.ConfirmTool(ctx, block.Name, block.Input)
-							if err != nil {
-								result = fmt.Sprintf("confirmation cancelled: %v", err)
-								isErr = true
-							} else if !approved {
-								result = fmt.Sprintf("tool %q was not approved by user", block.Name)
-								isErr = true
-							}
-						}
-						if !isErr {
-							r, err := t.Call(ctx, block.Input)
-							if err != nil {
-								result = err.Error()
-								isErr = true
-							} else {
-								result = r
-							}
-						}
-					}
-					resultCh <- indexedToolResult{idx: idx, toolUseID: block.ID, result: result, isErr: isErr}
-				}(i, tu)
-			}
-			wg.Wait()
-			close(resultCh)
-
-			sorted := make([]indexedToolResult, len(toolUses))
-			for r := range resultCh {
-				sorted[r.idx] = r
-			}
-
-			userMsg := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
-			for _, r := range sorted {
-				userMsg.AddToolResult(r.toolUseID, r.result, r.isErr)
-			}
-
+			userMsg := executeTools(ctx, assistantMsg.ToolUses(), params)
 			msgs = append(msgs, userMsg)
-			out <- Event{Type: "user_message", Message: userMsg}
+			out <- Event{Type: EventTypeUserMessage, Message: userMsg}
 			turnCount++
 		}
 	}()
@@ -512,22 +241,186 @@ func Query(ctx context.Context, params Params) <-chan Event {
 	return out
 }
 
-func newPromptTooLongAssistantMessage(err error) message.Message {
+// runCompactionPipeline runs snip, microcompact, auto-compact, and the blocking
+// limit check. It emits a compaction_result event when auto-compact fires.
+// Returns the (possibly) updated message slice, whether compaction occurred, and
+// any fatal error that should abort the query loop.
+func runCompactionPipeline(ctx context.Context, msgs []message.Message, params Params, turnCount int, autoCompactTracking *compact.AutoCompactTrackingState, out chan<- Event) (newMsgs []message.Message, compacted bool, err error) {
+	var snipResult compact.SnipResult
+	if !params.DisableCompact {
+		snipResult = compact.SnipCompactIfNeeded(msgs)
+		msgs = snipResult.Messages
+
+		mcResult := compact.MicrocompactMessages(msgs)
+		if mcResult.Changed {
+			debugLog(params.Debug, "tri micro compact\n")
+			for _, m := range mcResult.Messages {
+				for _, block := range m.Content {
+					if tr, ok := block.(message.ToolResultBlock); ok {
+						debugLog(params.Debug, "micro tool_result %s: %s\n", tr.ToolUseID, tr.Content)
+					}
+				}
+			}
+			msgs = mcResult.Messages
+		}
+
+		if compact.ShouldAutoCompact(ctx, msgs, params.Model, params.Client, compact.QuerySource(params.QuerySource), snipResult.TokensFreed) {
+			debugLog(params.Debug, "auto-compact starting (turn %d)\n", turnCount)
+			wasCompacted, compactResult, nextFailures, compactErr := compact.AutoCompactIfNeeded(ctx, msgs, params.Model, params.Client, compact.QuerySource(params.QuerySource), autoCompactTracking, snipResult.TokensFreed)
+			autoCompactTracking.ConsecutiveFailures = nextFailures
+			if compactErr != nil {
+				debugLog(params.Debug, "auto-compact error: %v\n", compactErr)
+				return nil, false, fmt.Errorf("autocompact failed: %w", compactErr)
+			}
+			if wasCompacted && compactResult != nil {
+				debugLog(params.Debug, "auto-compact success: %d -> %d messages\n", len(msgs), len(compactResult.Messages))
+				msgs = compactResult.Messages
+				out <- Event{Type: EventTypeCompactionResult, Messages: compactResult.Messages}
+				autoCompactTracking.Compacted = true
+				autoCompactTracking.TurnCounter = turnCount
+				autoCompactTracking.TurnID = fmt.Sprintf("turn-%d", turnCount)
+				compacted = true
+			}
+		} else {
+			autoCompactTracking.ConsecutiveFailures = 0
+		}
+	}
+
+	if !compacted &&
+		params.QuerySource != QuerySourceCompact &&
+		params.QuerySource != QuerySourceSessionMemory {
+		tokenCount := tokens.TokenCountWithEstimation(msgs) - snipResult.TokensFreed
+		state := compact.CalculateTokenWarningState(tokenCount, params.Model)
+		if state.IsAtBlockingLimit {
+			return nil, false, fmt.Errorf("Context is too large. Run /compact to reduce context size.")
+		}
+	}
+
+	return msgs, compacted, nil
+}
+
+// executeTools runs all tool_use blocks in parallel and returns a single user
+// message containing the ordered tool_result blocks.
+func executeTools(ctx context.Context, toolUses []message.ToolUseBlock, params Params) message.Message {
+	type indexedToolResult struct {
+		idx       int
+		toolUseID string
+		result    string
+		isErr     bool
+	}
+	resultCh := make(chan indexedToolResult, len(toolUses))
+
+	var wg sync.WaitGroup
+	for i, tu := range toolUses {
+		wg.Add(1)
+		go func(idx int, block message.ToolUseBlock) {
+			defer wg.Done()
+			t := params.Tools.Find(block.Name)
+			var result string
+			var isErr bool
+			if t == nil {
+				result = fmt.Sprintf("Tool %q not found", block.Name)
+				isErr = true
+			} else {
+				if params.ConfirmTool != nil && params.Tools.IsRisky(block.Name) {
+					approved, err := params.ConfirmTool(ctx, block.Name, block.Input)
+					if err != nil {
+						result = fmt.Sprintf("confirmation cancelled: %v", err)
+						isErr = true
+					} else if !approved {
+						result = fmt.Sprintf("tool %q was not approved by user", block.Name)
+						isErr = true
+					}
+				}
+				if !isErr {
+					r, err := t.Call(ctx, block.Input)
+					if err != nil {
+						result = err.Error()
+						isErr = true
+					} else {
+						result = r
+					}
+				}
+			}
+			resultCh <- indexedToolResult{idx: idx, toolUseID: block.ID, result: result, isErr: isErr}
+		}(i, tu)
+	}
+	wg.Wait()
+	close(resultCh)
+
+	sorted := make([]indexedToolResult, len(toolUses))
+	for r := range resultCh {
+		sorted[r.idx] = r
+	}
+
+	userMsg := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
+	for _, r := range sorted {
+		userMsg.AddToolResult(r.toolUseID, r.result, r.isErr)
+	}
+	return userMsg
+}
+
+// maybeRecoverPromptTooLong attempts to recover from a prompt-too-long error by
+// reactively compacting the message history. If recovery succeeds it returns
+// the new message slice and true. If recovery fails it emits a terminal result
+// event and returns nil, false.
+func maybeRecoverPromptTooLong(msgs []message.Message, assistantMsg message.Message, turnCount int, out chan<- Event) ([]message.Message, bool) {
+	recoveryResult := compact.ReactiveCompactOnPromptTooLong(msgs, nil)
+	if recoveryResult.OK && recoveryResult.Result != nil {
+		return recoveryResult.Result.Messages, true
+	}
+	out <- Event{
+		Type: EventTypeResult,
+		Result: Result{
+			Success:    false,
+			Error:      assistantMsg.TextContent(),
+			StopReason: StopReasonPromptTooLong,
+			NumTurns:   turnCount,
+		},
+	}
+	return nil, false
+}
+
+// maybeRecoverMaxOutputTokens handles the max_output_tokens stop reason by
+// injecting a user message that asks the model to continue. It returns the
+// updated message slice and true when recovery was triggered.
+func maybeRecoverMaxOutputTokens(msgs []message.Message, hasToolUse bool, stopReason string, out chan<- Event) ([]message.Message, bool) {
+	if hasToolUse || stopReason != StopReasonMaxOutputTokens {
+		return msgs, false
+	}
+	recoveryMsg := message.Message{Role: message.RoleUser, Timestamp: time.Now()}
+	recoveryMsg.AddText(
+		"Output token limit hit. Resume directly — no apology, no recap of what you were doing. " +
+			"Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+	)
+	msgs = append(msgs, recoveryMsg)
+	out <- Event{Type: EventTypeUserMessage, Message: recoveryMsg}
+	return msgs, true
+}
+
+func newPromptTooLongAssistantMessage(details string) message.Message {
 	msg := message.Message{Role: message.RoleAssistant, Timestamp: time.Now()}
 	msg.AddText("Prompt is too long")
 	msg.APIError = "invalid_request"
-	if err != nil {
-		msg.ErrorDetails = err.Error()
-	}
+	msg.ErrorDetails = details
 	return msg
 }
 
-func newPromptTooLongAssistantMessageFromText(text string) message.Message {
-	msg := message.Message{Role: message.RoleAssistant, Timestamp: time.Now()}
-	msg.AddText("Prompt is too long")
-	msg.APIError = "invalid_request"
-	msg.ErrorDetails = text
-	return msg
+// usageFromStreamEvent extracts a Usage struct from a StreamEvent.
+// It prefers the explicit Usage pointer, but falls back to the legacy
+// UsagePromptTokens / UsageCompletionTokens / UsageTotalTokens fields
+// for providers that do not populate the unified Usage field.
+func usageFromStreamEvent(evt llm.StreamEvent) *message.Usage {
+	if evt.Usage != nil {
+		return evt.Usage
+	}
+	if evt.UsagePromptTokens > 0 || evt.UsageCompletionTokens > 0 || evt.UsageTotalTokens > 0 {
+		return &message.Usage{
+			InputTokens:  evt.UsagePromptTokens,
+			OutputTokens: evt.UsageCompletionTokens,
+		}
+	}
+	return nil
 }
 
 // mergeUsage merges non-zero fields from src into dst using overwrite (not
@@ -559,13 +452,3 @@ func mergeUsage(dst, src *message.Usage) *message.Usage {
 	return dst
 }
 
-// isRiskyTool returns true for tools that may modify state or execute
-// arbitrary commands and should require user confirmation.
-func isRiskyTool(name string) bool {
-	switch name {
-	case "bash", "file_write", "file_edit", "confirm":
-		return true
-	default:
-		return false
-	}
-}

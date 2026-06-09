@@ -5,12 +5,76 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/Jekinnnnnn/jekylan/internal/message"
 	"github.com/Jekinnnnnn/jekylan/internal/tool"
 	oai "github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 )
+
+func toOpenAIMessages(m message.Message) []oai.ChatCompletionMessageParamUnion {
+	switch m.Role {
+	case message.RoleAssistant:
+		var assistant oai.ChatCompletionAssistantMessageParam
+		var toolCalls []oai.ChatCompletionMessageToolCallParam
+		var textBuf strings.Builder
+		for _, block := range m.Content {
+			switch b := block.(type) {
+			case message.TextBlock:
+				textBuf.WriteString(b.Text)
+			case message.ToolUseBlock:
+				inputJSON, _ := json.Marshal(b.Input)
+				toolCalls = append(toolCalls, oai.ChatCompletionMessageToolCallParam{
+					ID:   b.ID,
+					Type: "function",
+					Function: oai.ChatCompletionMessageToolCallFunctionParam{
+						Name:      b.Name,
+						Arguments: string(inputJSON),
+					},
+				})
+			}
+		}
+		assistant.Content.OfString = oai.String(textBuf.String())
+		if len(toolCalls) > 0 {
+			assistant.ToolCalls = toolCalls
+		}
+		return []oai.ChatCompletionMessageParamUnion{{OfAssistant: &assistant}}
+	case message.RoleUser:
+		var content strings.Builder
+		var out []oai.ChatCompletionMessageParamUnion
+		for _, block := range m.Content {
+			switch b := block.(type) {
+			case message.TextBlock:
+				content.WriteString(b.Text)
+			case message.ToolResultBlock:
+				out = append(out, oai.ToolMessage(b.Content, b.ToolUseID))
+			}
+		}
+		if content.Len() > 0 {
+			out = append(out, oai.UserMessage(content.String()))
+		}
+		return out
+	case message.RoleSystem:
+		var content strings.Builder
+		for _, block := range m.Content {
+			if b, ok := block.(message.TextBlock); ok {
+				content.WriteString(b.Text)
+			}
+		}
+		return []oai.ChatCompletionMessageParamUnion{oai.SystemMessage(content.String())}
+	default:
+		return []oai.ChatCompletionMessageParamUnion{oai.UserMessage("")}
+	}
+}
+
+func toOpenAIMessage(m message.Message) oai.ChatCompletionMessageParamUnion {
+	msgs := toOpenAIMessages(m)
+	if len(msgs) > 0 {
+		return msgs[0]
+	}
+	return oai.UserMessage("")
+}
 
 // OpenAIClient wraps the OpenAI SDK for streaming chat completion.
 type OpenAIClient struct {
@@ -60,7 +124,10 @@ func (c *OpenAIClient) StreamMessages(ctx context.Context, msgs []message.Messag
 	}
 
 	for _, m := range msgs {
-		params.Messages = append(params.Messages, m.ToOpenAIMessages()...)
+		if m.Role == message.RoleSystem {
+			continue
+		}
+		params.Messages = append(params.Messages, toOpenAIMessages(m)...)
 	}
 
 	if tools != nil {

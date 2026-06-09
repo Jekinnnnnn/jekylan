@@ -2,64 +2,9 @@ package message
 
 import (
 	"encoding/json"
-	"fmt"
-	"strings"
 	"testing"
+	"time"
 )
-
-func TestToAnthropicMessage_CacheBreakpoint(t *testing.T) {
-	m := Message{Role: RoleUser, CacheBreakpoint: true}
-	m.AddText("first text")
-	m.AddToolResult("tool-1", "result", false)
-	m.AddText("last text")
-
-	am := m.ToAnthropicMessage()
-	b, _ := json.Marshal(am)
-	s := string(b)
-
-	if !contains(s, "cache_control") {
-		t.Fatalf("expected cache_control in JSON, got: %s", s)
-	}
-	if !contains(s, "ephemeral") {
-		t.Fatalf("expected ephemeral in cache_control, got: %s", s)
-	}
-}
-
-func TestToAnthropicMessage_CacheBreakpoint_LastTextBlock(t *testing.T) {
-	m := Message{Role: RoleAssistant, CacheBreakpoint: true}
-	m.AddText("text one")
-	m.AddText("text two") // this should get the breakpoint
-
-	am := m.ToAnthropicMessage()
-	b, _ := json.Marshal(am)
-	s := string(b)
-
-	// Count occurrences of cache_control — should be exactly 1 (on the last text block).
-	count := 0
-	for i := 0; i < len(s)-len("cache_control"); i++ {
-		if s[i:i+len("cache_control")] == "cache_control" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("expected exactly 1 cache_control marker, got %d", count)
-	}
-}
-
-func TestToAnthropicMessage_NoCacheBreakpoint(t *testing.T) {
-	m := Message{Role: RoleUser}
-	m.AddText("hello")
-
-	am := m.ToAnthropicMessage()
-	b, _ := json.Marshal(am)
-	s := string(b)
-
-	if contains(s, "cache_control") {
-		t.Fatalf("expected no cache_control without CacheBreakpoint, got: %s", s)
-	}
-}
-
-func contains(s, substr string) bool { return strings.Contains(s, substr) }
 
 func TestUsageString(t *testing.T) {
 	u := Usage{InputTokens: 100, OutputTokens: 50}
@@ -73,21 +18,104 @@ func TestUsageString(t *testing.T) {
 	}
 }
 
-func TestAnthropicMessageSerializationTwoTurns(t *testing.T) {
-	user1 := Message{Role: RoleUser}
-	user1.AddText("hello")
+func TestRoundTripJSON(t *testing.T) {
+	msg := Message{
+		Role:      RoleAssistant,
+		Timestamp: time.Date(2024, 6, 15, 10, 0, 0, 0, time.UTC),
+		TurnMetadata: TurnMetadata{
+			Usage:           &Usage{InputTokens: 100, OutputTokens: 50, CacheCreationInputTokens: 10, CacheReadInputTokens: 20},
+			ResponseID:      "resp-123",
+			CacheBreakpoint: true,
+		},
+	}
+	msg.AddText("hello")
+	msg.AddToolUse("tu1", "bash", map[string]any{"command": "ls"})
+	msg.AddToolResult("tu1", "result", false)
+	msg.AddThinking("thinking...", "sig")
+	msg.AddRedactedThinking("redacted-data")
 
-	assistant1 := Message{Role: RoleAssistant}
-	assistant1.AddText("Hello! How can I help you today?")
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 
-	user2 := Message{Role: RoleUser}
-	user2.AddText("what's the weather")
+	var decoded Message
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 
-	msgs := []Message{user1, assistant1, user2}
+	if decoded.Role != msg.Role {
+		t.Errorf("role: got %q, want %q", decoded.Role, msg.Role)
+	}
+	if decoded.ResponseID != msg.ResponseID {
+		t.Errorf("response_id: got %q, want %q", decoded.ResponseID, msg.ResponseID)
+	}
+	if !decoded.CacheBreakpoint {
+		t.Error("cache_breakpoint lost")
+	}
+	if decoded.Usage == nil || decoded.Usage.InputTokens != 100 || decoded.Usage.OutputTokens != 50 {
+		t.Errorf("usage mismatch: got %+v", decoded.Usage)
+	}
+	if len(decoded.Content) != len(msg.Content) {
+		t.Fatalf("content length: got %d, want %d", len(decoded.Content), len(msg.Content))
+	}
+}
 
-	for i, m := range msgs {
-		am := m.ToAnthropicMessage()
-		b, _ := json.MarshalIndent(am, "", "  ")
-		fmt.Printf("\nMessage %d (role=%s):\n%s\n", i, m.Role, string(b))
+func TestTextContent(t *testing.T) {
+	m := Message{Role: RoleUser}
+	m.AddText("hello")
+	m.AddText(" world")
+	if got := m.TextContent(); got != "hello world" {
+		t.Errorf("TextContent: got %q, want %q", got, "hello world")
+	}
+}
+
+func TestToolUses(t *testing.T) {
+	m := Message{Role: RoleAssistant}
+	m.AddToolUse("tu1", "bash", nil)
+	m.AddToolUse("tu2", "skill", nil)
+	uses := m.ToolUses()
+	if len(uses) != 2 {
+		t.Fatalf("expected 2 tool uses, got %d", len(uses))
+	}
+	if uses[0].ID != "tu1" || uses[1].ID != "tu2" {
+		t.Errorf("tool use IDs mismatch: %+v", uses)
+	}
+}
+
+func TestToolResults(t *testing.T) {
+	m := Message{Role: RoleUser}
+	m.AddToolResult("tu1", "r1", false)
+	m.AddToolResult("tu2", "r2", true)
+	results := m.ToolResults()
+	if len(results) != 2 {
+		t.Fatalf("expected 2 tool results, got %d", len(results))
+	}
+	if results[0].Content != "r1" || results[1].IsError != true {
+		t.Errorf("tool results mismatch: %+v", results)
+	}
+}
+
+func TestParseHumanTime(t *testing.T) {
+	if ts, err := parseHumanTime(""); err != nil || !ts.IsZero() {
+		t.Errorf("empty string: expected zero time, got %v, err=%v", ts, err)
+	}
+	if ts, err := parseHumanTime("2024-06-15 10:00:00"); err != nil || ts.Year() != 2024 {
+		t.Errorf("valid time: expected 2024, got %v, err=%v", ts, err)
+	}
+	if _, err := parseHumanTime("invalid"); err == nil {
+		t.Error("invalid time: expected error")
+	}
+}
+
+func TestAddMethods(t *testing.T) {
+	var m Message
+	m.AddText("t")
+	m.AddToolUse("id", "name", map[string]any{"k": "v"})
+	m.AddToolResult("tid", "res", true)
+	m.AddThinking("think", "sig")
+	m.AddRedactedThinking("data")
+	if len(m.Content) != 5 {
+		t.Fatalf("expected 5 blocks, got %d", len(m.Content))
 	}
 }

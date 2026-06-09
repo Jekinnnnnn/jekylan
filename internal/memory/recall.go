@@ -178,7 +178,7 @@ func isCJK(r rune) bool {
 
 func matchesKeywords(h MemoryHeader, keywords []string) bool {
 	if len(keywords) == 0 {
-		return true
+		return false
 	}
 	text := strings.ToLower(h.Filename + " " + h.Description)
 	for _, kw := range keywords {

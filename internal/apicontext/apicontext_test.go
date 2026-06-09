@@ -1,4 +1,4 @@
-package compact
+package apicontext
 
 import (
 	"strings"
@@ -6,7 +6,6 @@ import (
 )
 
 func TestGetAPIContextManagementNoOptions(t *testing.T) {
-	SetOptions(Options{UserType: ""})
 	cfg := GetAPIContextManagement(nil)
 	if cfg != nil {
 		t.Error("expected nil when no strategies apply")
@@ -14,7 +13,6 @@ func TestGetAPIContextManagementNoOptions(t *testing.T) {
 }
 
 func TestGetAPIContextManagementThinking(t *testing.T) {
-	SetOptions(Options{UserType: ""})
 	cfg := GetAPIContextManagement(&APIContextManagementOptions{
 		HasThinking: true,
 	})
@@ -44,7 +42,6 @@ func TestGetAPIContextManagementRedactThinking(t *testing.T) {
 }
 
 func TestGetAPIContextManagementClearAllThinking(t *testing.T) {
-	SetOptions(Options{UserType: ""})
 	cfg := GetAPIContextManagement(&APIContextManagementOptions{
 		HasThinking:      true,
 		ClearAllThinking: true,
@@ -62,13 +59,10 @@ func TestGetAPIContextManagementClearAllThinking(t *testing.T) {
 }
 
 func TestGetAPIContextManagementToolResults(t *testing.T) {
-	SetOptions(Options{
-		UserType:               "ant",
+	cfg := GetAPIContextManagement(&APIContextManagementOptions{
 		UseAPIClearToolResults: true,
 		UseAPIClearToolUses:    false,
 	})
-
-	cfg := GetAPIContextManagement(nil)
 	if cfg == nil {
 		t.Fatal("expected config")
 	}
@@ -95,13 +89,10 @@ func TestGetAPIContextManagementToolResults(t *testing.T) {
 }
 
 func TestGetAPIContextManagementToolUses(t *testing.T) {
-	SetOptions(Options{
-		UserType:               "ant",
+	cfg := GetAPIContextManagement(&APIContextManagementOptions{
 		UseAPIClearToolResults: false,
 		UseAPIClearToolUses:    true,
 	})
-
-	cfg := GetAPIContextManagement(nil)
 	if cfg == nil {
 		t.Fatal("expected config")
 	}
@@ -115,22 +106,19 @@ func TestGetAPIContextManagementToolUses(t *testing.T) {
 }
 
 func TestGetAPIContextManagementEnvOverrides(t *testing.T) {
-	SetOptions(Options{
-		UserType:               "ant",
+	cfg := GetAPIContextManagement(&APIContextManagementOptions{
 		UseAPIClearToolResults: true,
-		APIMaxInputTokens:      100000,
-		APITargetInputTokens:   20000,
+		APIMaxInputTokens:      100_000,
+		APITargetInputTokens:   20_000,
 	})
-
-	cfg := GetAPIContextManagement(nil)
 	if cfg == nil {
 		t.Fatal("expected config")
 	}
 	edit := cfg.Edits[0]
-	if edit.Trigger.Value != 100000 {
+	if edit.Trigger.Value != 100_000 {
 		t.Errorf("expected trigger=100000, got %d", edit.Trigger.Value)
 	}
-	if edit.ClearAtLeast.Value != 80000 {
+	if edit.ClearAtLeast.Value != 80_000 {
 		t.Errorf("expected clear_at_least=80000, got %d", edit.ClearAtLeast.Value)
 	}
 }
@@ -146,7 +134,7 @@ func TestContextManagementConfigJSON(t *testing.T) {
 				Type: "clear_tool_uses_mc",
 				Trigger: &ThresholdConfig{
 					Type:  "input_tokens",
-					Value: 180000,
+					Value: 180_000,
 				},
 				ClearToolInputs: []string{"bash", "grep"},
 			},

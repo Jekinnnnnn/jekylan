@@ -52,7 +52,7 @@ func TestBuildFullSystemPromptDefault(t *testing.T) {
 }
 
 func TestGetUsingToolsSection(t *testing.T) {
-	section := getUsingToolsSection()
+	section := readPromptFile("using_tools.md")
 	if !strings.Contains(section, "bash") {
 		t.Error("expected bash tool reference")
 	}
@@ -70,7 +70,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 	})
 	tools := tool.NewRegistry(tool.SkillTool{Registry: reg})
 
-	prompt := BuildSystemPrompt("", "glm5.1", tools, "", "")
+	prompt := BuildSystemPrompt("", "glm5.1", tools, "")
 
 	// Base sections
 	if !strings.Contains(prompt, "Use the instructions below") {
@@ -84,7 +84,7 @@ func TestBuildSystemPrompt(t *testing.T) {
 }
 
 func TestBuildSystemPromptWithTokenBudget(t *testing.T) {
-	prompt := BuildSystemPrompt("", "model", tool.NewRegistry(), "1000000", "")
+	prompt := BuildSystemPrompt("", "model", tool.NewRegistry(), "1000000")
 	if !strings.Contains(prompt, "Token Budget") {
 		t.Error("expected token budget section")
 	}
@@ -97,7 +97,7 @@ func TestBuildSystemPromptWithMemory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tmpDir, "MEMORY.md"), []byte("- [Test](test.md) — test hook"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	prompt := BuildSystemPrompt("", "model", tool.NewRegistry(), "", tmpDir)
+	prompt := BuildSystemPrompt("", "model", tool.NewRegistry(), "")
 	if strings.Contains(prompt, "auto memory") {
 		t.Error("memory section should NOT be in main system prompt")
 	}

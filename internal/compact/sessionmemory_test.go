@@ -119,8 +119,8 @@ func TestAdjustIndexToPreserveAPIInvariants(t *testing.T) {
 
 func TestAdjustIndexForSplitRecords(t *testing.T) {
 	msgs := []message.Message{
-		{Role: message.RoleAssistant, ResponseID: "resp-1", Content: []message.ContentBlock{message.ThinkingBlock{Thinking: "think"}}},
-		{Role: message.RoleAssistant, ResponseID: "resp-1", Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-1"}, Content: []message.ContentBlock{message.ThinkingBlock{Thinking: "think"}}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-1"}, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}},
 	}
 	got := adjustIndexToPreserveAPIInvariants(msgs, 1)
 	if got != 0 {
@@ -196,7 +196,7 @@ func TestTrySessionMemoryCompactionWithMemory(t *testing.T) {
 
 	msgs := []message.Message{
 		{Role: message.RoleUser, Content: []message.ContentBlock{message.TextBlock{Text: "hello"}}},
-		{Role: message.RoleAssistant, ResponseID: "resp-1", Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}},
+		{Role: message.RoleAssistant, TurnMetadata: message.TurnMetadata{ResponseID: "resp-1"}, Content: []message.ContentBlock{message.TextBlock{Text: "hi"}}},
 	}
 
 	result := TrySessionMemoryCompaction(msgs, 1_000_000)
